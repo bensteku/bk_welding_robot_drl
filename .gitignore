@@ -1,0 +1,8 @@
+*.obj
+*.urdf
+*.mtl
+*.xml
+*.stl
+*.png
+*pycache*
+todo.md
