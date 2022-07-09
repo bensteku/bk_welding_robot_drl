@@ -1,45 +1,58 @@
-from ast import Not
-from turtle import Turtle
 import gym
 import pybullet as pyb
 import time
 import numpy as np
-from util.util import matrix_to_quaternion, rpy_to_quaternion
-
-# TODO: subclass such that there are two classes, one for using pybullet, one for MOSES
+from util.util import matrix_to_quaternion, rpy_to_quaternion, quaternion_to_euler_angle
 
 class WeldingEnvironment(gym.Env):
 
-    def __init__(self):
+    def __init__(self, 
+                agent,
+                relative_movement=False):
         
         self._random_state = None
+        self._relative_movement = relative_movement
 
         # variables needed by Gym env subclasses
 
         #   contains the position (as xyz) and rotation (as quaternion xyzw) of the end effector (i.e. the welding torch) in workspace coordinates
-        min_position = np.array([0., -1., 0.1])  # provisional
-        max_position = np.array([1., 1, 0.3])
+        min_position = np.array([0., -1., 0.05])  # provisional
+        max_position = np.array([1., 1, 1])
 
-        min_rotation = np.array(rpy_to_quaternion([ele * np.pi/180. for ele in [-10., -10., -100.]])) 
-        max_rotation = np.array(rpy_to_quaternion([ele * np.pi/180. for ele in [10., 10., 100.]]))
+        #min_rotation = np.array(rpy_to_quaternion([2*ele * np.pi/180. for ele in [-10., -10., -100.]])) 
+        #max_rotation = np.array(rpy_to_quaternion([2*ele * np.pi/180. for ele in [10., 10., 100.]]))
+        min_rotation = np.array([-30., -30., -140.]) * np.pi/180
+        max_rotation = np.array([30., 30., 140.]) * np.pi/180
         self.observation_space = gym.spaces.Dict(
             {
                 'position': gym.spaces.Box(low=min_position, high=max_position, shape=(3,), dtype=np.float32),
-                'rotation': gym.spaces.Box(low=min_rotation, high=max_rotation, shape=(4,), dtype=np.float32)
+                #'rotation': gym.spaces.Box(low=min_rotation, high=max_rotation, shape=(4,), dtype=np.float32)
+                'rotation': gym.spaces.Box(low=min_rotation, high=max_rotation, shape=(3,), dtype=np.float32)
             }
         )
         
-        #   actions consist of translating and rotating the end effector
+        # actions consist of translating and rotating the end effector
+        # if relative_movement is true, then actions consists of additional movements
+        # if it is false, then they consist of positions to be reached
+        if relative_movement:
+            min_position = np.array([-0.01, -0.01, -0.01])  # provisional
+            max_position = -1 * min_position
+
+            #min_rotation = np.array(rpy_to_quaternion([ele * np.pi/180. for ele in [-0.001, -0.001, -0.001]])) 
+            #max_rotation = np.array(rpy_to_quaternion([ele * np.pi/180. for ele in [0.001, 0.001, 0.001]]))
+            min_rotation = np.array([-0.001, -0.001, -0.001]) * np.pi/180
+            max_rotation = np.array([0.001, 0.001, 0.001]) * np.pi/180
         self.action_space = gym.spaces.Dict(
             {
                 'translate': gym.spaces.Box(low=min_position, high=max_position, shape=(3,), dtype=np.float32),
-                'rotate': gym.spaces.Box(low=min_rotation, high=max_rotation, shape=(4,), dtype=np.float32)
+                #'rotate': gym.spaces.Box(low=min_rotation, high=max_rotation, shape=(4,), dtype=np.float32)
+                'rotate': gym.spaces.Box(low=min_rotation, high=max_rotation, shape=(3,), dtype=np.float32)
             }
         )
-        # TODO: marginal movement or absolute movement?
 
         # agent, needs to be set after construction due to mutual dependence
-        self.agent = 1#None
+        self.agent = agent
+        self.agent._set_env(self)
 
     #####################################################
     # methods for Gym subclass, left as virtual methods #
@@ -62,7 +75,9 @@ class WeldingEnvironment(gym.Env):
         if not self.agent:  # no agent has been set
             raise ValueError("Agent needs to be created and set for this environment via set_agent()")
 
-        self._perform_action(action)
+        timeout = self._perform_action(action)
+        if timeout:
+            return self._get_obs(), 0, False, None
         reward, info = self.calc_reward() if action is not None else (0, {})
         done = self.is_done()
 
@@ -97,24 +112,67 @@ class WeldingEnvironment(gym.Env):
 class WeldingEnvironmentMOSES(WeldingEnvironment):
 
     def __init__(self,
+                agent,
                 asset_files_path,
+                relative_movement=False
                 ):
 
-        raise NotImplementedError
+        self.asset_files_path = asset_files_path
+        super().__init__(agent, relative_movement)
 
 class WeldingEnvironmentPybullet(WeldingEnvironment):
 
     def __init__(self,
+                agent,
                 asset_files_path,
                 display=False,
-                hz=240):
+                hz=240,
+                robot="ur5",
+                relative_movement=False):
 
-        super().__init__()
+        super().__init__(agent, relative_movement)
 
         self.asset_files_path = asset_files_path
         self.obj_ids = {'fixed': [], 'rigid': []}  # dict of objects by type of body dynamics
-        self.resting_pose_angles = np.array([-1, -0.5, 0.5, -0.5, -0.5, 0]) * np.pi  # angles for the default pose of the UR5 robot, to be replaced with some angles of the welding robot
         self.tool = 0  # 0: TAND GERAD, 1: MRW510
+        if robot in ["ur5","kr6","kr16"]:
+            self.robot_name = robot
+        else:
+            raise ValueError("Robot model not supported")
+
+        # angles for the default pose of the robot, found by trial and error
+        self.resting_pose_angles = {  
+            "ur5": np.array([-1, -0.5, 0.5, -0.5, -0.5, 0]) * np.pi,
+            "kr16": np.array([0, -0.5, 0.5, -1, -0.5, 0]) * np.pi,
+            "kr6": np.array([-1, -0.5, 0.5, -0.5, -0.5, 0]) * np.pi # copied from ur5, needs to be adjusted
+        }
+
+        # end effector link id
+        self.end_effector_link_id = {
+            "ur5": 10,
+            "kr16": 7,  #subject to change, need to add invisible link for tool tip
+            "kr6": 6  # needs confirmation
+        }
+
+        # joint limits and ranges, needed for inverse kinematics
+        self.joints_lower = {
+            "ur5": [-3 * np.pi / 2, -2.3562, -17, -17, -17, -17],
+            "kr16": [-3.228859, -3.228859, -2.408554, -6.108652, -2.26892, -6.108652],
+            "kr6": []
+        }
+
+        self.joints_upper = {
+            "ur5": [-np.pi / 2, 0, 17, 17, 17, 17],
+            "kr16": [3.22885911, 1.13446401, 3.0543261, 6.10865238, 2.26892802, 6.1086523],
+            "kr6": []
+        }
+
+        self.joints_range = {
+            "ur5": [np.pi, 2.3562, 34, 34, 34, 34],
+            "kr16": list(np.array(self.joints_upper["kr16"])-np.array(self.joints_lower["kr16"])),
+            "kr6": []
+        }
+        print(self.joints_range)
         
         # pybullet connection and setup
         disp = pyb.DIRECT  # direct <-> no gui, use for training
@@ -154,14 +212,15 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         # info: the welding torch is contained within the urdf file of the robot
         # I tried to do this via a constraint connecting the end effector link with the torch loaded in as a separate urf
         # this works, but one cannot then use the pybullet inverse kinematics method for the the tip of the torch
+        # because it relies on using a link within the robot urdf
         if self.tool:
-            self.robot = pyb.loadURDF("ur5/ur5_mrw510.urdf")  # UR5 robot for the moment, TODO: replace with actual welding robot
+            self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_mrw510.urdf", useFixedBase=True)
         else:
-            self.robot = pyb.loadURDF("ur5/ur5_tand_gerad.urdf")
+            self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_tand_gerad.urdf", useFixedBase=True)
         joints = [pyb.getJointInfo(self.robot, i) for i in range(pyb.getNumJoints(self.robot))]
         self.joints = [j[0] for j in joints if j[2] == pyb.JOINT_REVOLUTE]
         for i in range(len(self.joints)):
-            pyb.resetJointState(self.robot, self.joints[i], self.resting_pose_angles[i])
+            pyb.resetJointState(self.robot, self.joints[i], self.resting_pose_angles[self.robot_name][i])
 
         # turn on rendering again
         pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
@@ -185,8 +244,8 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             z = pyb.readUserDebugParameter(fwdzId)
 
             self.movep(([x,y,z],pyb.getQuaternionFromEuler([roll,pitch,yaw])))
-
         """
+        
 
         obs, _, _, _ = self.step()  # return an observation of the environment without any actions taken
 
@@ -196,12 +255,13 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
 
         tmp = pyb.getLinkState(
                             bodyUniqueId=self.robot,
-                            linkIndex=10,
+                            linkIndex=self.end_effector_link_id[self.robot_name],
                             computeForwardKinematics=True  # need to check if this is necessary, if not can be turned off for performance gain
             )
         return {
             'position': tmp[0],  # index 0 is linkWorldPosition
-            'rotation': tmp[1]  # index 1 is linkWorldOrientation as quaternion
+            #'rotation': tmp[1]  # index 1 is linkWorldOrientation as quaternion
+            'rotation': quaternion_to_euler_angle(tmp[1])  # index 1 is linkWorldOrientation as quaternion
         }       
 
     def close(self):
@@ -233,7 +293,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             # check if current joint state is suffieciently close to resting state
             currj = [pyb.getJointState(self.robot, i)[0] for i in self.joints]
             currj = np.array(currj)
-            diffj = self.resting_pose_angles - currj
+            diffj = self.resting_pose_angles[self.robot_name] - currj
             if not all(np.abs(diffj) < 1e-2):
                 return False
             else:
@@ -242,13 +302,13 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                 pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)
                 pyb.removeBody(self.robot)
                 if self.tool:
-                    self.robot = pyb.loadURDF("ur5/ur5_mrw510.urdf")
+                    self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_mrw510.urdf")
                 else:
-                    self.robot = pyb.loadURDF("ur5/ur5_tand_gerad.urdf")
+                    self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_tand_gerad.urdf")
                 joints = [pyb.getJointInfo(self.robot, i) for i in range(pyb.getNumJoints(self.robot))]
                 self.joints = [j[0] for j in joints if j[2] == pyb.JOINT_REVOLUTE]
                 for i in range(len(self.joints)):
-                    pyb.resetJointState(self.robot, self.joints[i], self.resting_pose_angles[i])
+                    pyb.resetJointState(self.robot, self.joints[i], self.resting_pose_angles[self.robot_name][i])
                 pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
 
                 return True
@@ -259,10 +319,31 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
     def _perform_action(self, action):
 
         if action is not None:
-            timeout = self.movep((action["translate"], action["rotate"]))
-
+            # if relative movement is enabled, action must be transformed into absolute movement needed for robot control...
+            if self._relative_movement:
+                state = self._get_obs()
+                action_absolute = {"translate": state["position"] + action["translate"], "rotate": state["rotation"] + action["rotate"]}
+                new_state = {"position": action_absolute["translate"], "rotation": action_absolute["rotate"]}
+                """
+                print("state")
+                print(state)
+                print("action")
+                print(action)
+                print("new state")
+                print(new_state)
+                print("enthalten")
+                print(self.observation_space.contains(new_state))
+                """
+                if not self.observation_space.contains(new_state):
+                    return False  # if the current state+action results in invalid state, return false and do nothing
+                action_absolute["rotate"] = rpy_to_quaternion(action_absolute["rotate"])
+            # ....otherwise use it as is
+            else:
+                action_absolute = action
+                action_absolute["rotate"] = rpy_to_quaternion(action_absolute["rotate"])
+            timeout = self.movep((action_absolute["translate"], action_absolute["rotate"]))
             if timeout:
-                return self._get_obs(), 0.0, True, None
+                return timeout
         
         while not self.is_static:
             pyb.stepSimulation()
@@ -317,13 +398,13 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
 
         joints = pyb.calculateInverseKinematics(
             bodyUniqueId=self.robot,
-            endEffectorLinkIndex=10,
+            endEffectorLinkIndex=self.end_effector_link_id[self.robot_name],
             targetPosition=pose[0],
             targetOrientation=pose[1],
-            lowerLimits=[-3 * np.pi / 2, -2.3562, -17, -17, -17, -17],
-            upperLimits=[-np.pi / 2, 0, 17, 17, 17, 17],
-            jointRanges=[np.pi, 2.3562, 34, 34, 34, 34],  # * 6,
-            restPoses=np.float32(self.resting_pose_angles).tolist(),
+            lowerLimits=self.joints_lower[self.robot_name],
+            upperLimits=self.joints_upper[self.robot_name],
+            jointRanges=self.joints_range[self.robot_name],
+            restPoses=np.float32(self.resting_pose_angles[self.robot_name]).tolist(),
             maxNumIterations=100,
             residualThreshold=1e-5)
         joints = np.float32(joints)

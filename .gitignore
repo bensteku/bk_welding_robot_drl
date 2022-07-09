@@ -4,5 +4,6 @@
 *.xml
 *.stl
 *.png
+*.dae
 *pycache*
 todo.md

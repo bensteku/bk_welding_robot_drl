@@ -25,7 +25,7 @@ class Agent:
         # welding environment as defined in the other file, needs to be set after construction due to mutual dependence
         self.env = None
 
-    def set_env(self, senv: env.WeldingEnvironment):
+    def _set_env(self, senv: env.WeldingEnvironment):
         """
         Method for making known the env in which the agent is supposed to be working.
         May replace later on by making the env a param in the constructor.
