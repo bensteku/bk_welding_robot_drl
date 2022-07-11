@@ -15,7 +15,7 @@ class WeldingEnvironment(gym.Env):
 
         # variables needed by Gym env subclasses
 
-        #   contains the position (as xyz) and rotation (as quaternion xyzw) of the end effector (i.e. the welding torch) in workspace coordinates
+        #   contains the position (as xyz) and rotation (as roll-pitch-yaw rpy) of the end effector (i.e. the welding torch) in workspace coordinates
         min_position = np.array([0., -1., 0.05])  # provisional
         max_position = np.array([1., 1, 1])
 
@@ -26,7 +26,7 @@ class WeldingEnvironment(gym.Env):
         self.observation_space = gym.spaces.Dict(
             {
                 'position': gym.spaces.Box(low=min_position, high=max_position, shape=(3,), dtype=np.float32),
-                #'rotation': gym.spaces.Box(low=min_rotation, high=max_rotation, shape=(4,), dtype=np.float32)
+                'base_position': gym.spaces.Box(low=min_position[:2], high=max_position[:2], shape=(2,), dtype=np.float32),
                 'rotation': gym.spaces.Box(low=min_rotation, high=max_rotation, shape=(3,), dtype=np.float32)
             }
         )
@@ -45,7 +45,7 @@ class WeldingEnvironment(gym.Env):
         self.action_space = gym.spaces.Dict(
             {
                 'translate': gym.spaces.Box(low=min_position, high=max_position, shape=(3,), dtype=np.float32),
-                #'rotate': gym.spaces.Box(low=min_rotation, high=max_rotation, shape=(4,), dtype=np.float32)
+                'translate_base': gym.spaces.Box(low=min_position[:2], high=max_position[:2], shape=(2,), dtype=np.float32),
                 'rotate': gym.spaces.Box(low=min_rotation, high=max_rotation, shape=(3,), dtype=np.float32)
             }
         )
@@ -128,13 +128,15 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                 display=False,
                 hz=240,
                 robot="ur5",
-                relative_movement=False):
+                relative_movement=False,
+                fixed_height=2):
 
         super().__init__(agent, relative_movement)
 
         self.asset_files_path = asset_files_path
         self.obj_ids = {'fixed': [], 'rigid': []}  # dict of objects by type of body dynamics
         self.tool = 0  # 0: TAND GERAD, 1: MRW510
+        self.fixed_height = fixed_height   # height in Pybullet coordinates from which the robot arm hangs down
         if robot in ["ur5","kr6","kr16"]:
             self.robot_name = robot
         else:
@@ -152,6 +154,13 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             "ur5": 10,
             "kr16": 7,  #subject to change, need to add invisible link for tool tip
             "kr6": 6  # needs confirmation
+        }
+
+        # base link id
+        self.base_link_id =  {
+            "ur5": None,  # tbd
+            "kr16": 8,
+            "kr6": 8  # tbd
         }
 
         # joint limits and ranges, needed for inverse kinematics
@@ -214,9 +223,9 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         # this works, but one cannot then use the pybullet inverse kinematics method for the the tip of the torch
         # because it relies on using a link within the robot urdf
         if self.tool:
-            self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_mrw510.urdf", useFixedBase=True)
+            self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_mrw510.urdf", useFixedBase=True, basePosition=[0, 0, self.fixed_height], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
         else:
-            self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_tand_gerad.urdf", useFixedBase=True)
+            self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_tand_gerad.urdf", useFixedBase=True, basePosition=[0, 0, self.fixed_height], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
         joints = [pyb.getJointInfo(self.robot, i) for i in range(pyb.getNumJoints(self.robot))]
         self.joints = [j[0] for j in joints if j[2] == pyb.JOINT_REVOLUTE]
         for i in range(len(self.joints)):
@@ -258,9 +267,14 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                             linkIndex=self.end_effector_link_id[self.robot_name],
                             computeForwardKinematics=True  # need to check if this is necessary, if not can be turned off for performance gain
             )
+        tmp2 = pyb.getLinkState(
+                            bodyUniqueId=self.robot,
+                            linkIndex=self.base_link_id[self.robot_name],
+                            computeForwardKinematics=True  # need to check if this is necessary, if not can be turned off for performance gain
+            )
         return {
-            'position': tmp[0],  # index 0 is linkWorldPosition
-            #'rotation': tmp[1]  # index 1 is linkWorldOrientation as quaternion
+            'position': tmp[0],  # index 0 is linkWorldPosition,
+            'position_base':tmp2[0][:2],  # only xy position of baselink
             'rotation': quaternion_to_euler_angle(tmp[1])  # index 1 is linkWorldOrientation as quaternion
         }       
 
@@ -302,9 +316,9 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                 pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)
                 pyb.removeBody(self.robot)
                 if self.tool:
-                    self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_mrw510.urdf")
+                    self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_mrw510.urdf", basePosition=[0, 0, self.fixed_height], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
                 else:
-                    self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_tand_gerad.urdf")
+                    self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_tand_gerad.urdf", basePosition=[0, 0, self.fixed_height], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
                 joints = [pyb.getJointInfo(self.robot, i) for i in range(pyb.getNumJoints(self.robot))]
                 self.joints = [j[0] for j in joints if j[2] == pyb.JOINT_REVOLUTE]
                 for i in range(len(self.joints)):
@@ -322,8 +336,8 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             # if relative movement is enabled, action must be transformed into absolute movement needed for robot control...
             if self._relative_movement:
                 state = self._get_obs()
-                action_absolute = {"translate": state["position"] + action["translate"], "rotate": state["rotation"] + action["rotate"]}
-                new_state = {"position": action_absolute["translate"], "rotation": action_absolute["rotate"]}
+                action_absolute = {"translate": state["position"] + action["translate"], "rotate": state["rotation"] + action["rotate"], "translate_base": state["position_base"] + action["translate_base"]}
+                new_state = {"position": action_absolute["translate"], "rotation": action_absolute["rotate"], "position_base": action_absolute["translate_base"]}
                 """
                 print("state")
                 print(state)
@@ -334,13 +348,20 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                 print("enthalten")
                 print(self.observation_space.contains(new_state))
                 """
+                # turned off for testing purposes, activate later on
+                """
                 if not self.observation_space.contains(new_state):
                     return False  # if the current state+action results in invalid state, return false and do nothing
+                """
                 action_absolute["rotate"] = rpy_to_quaternion(action_absolute["rotate"])
             # ....otherwise use it as is
             else:
                 action_absolute = action
                 action_absolute["rotate"] = rpy_to_quaternion(action_absolute["rotate"])
+
+            # first move the base of the robot...
+            pyb.resetBasePositionAndOrientation(self.robot, np.append(action_absolute["translate_base"], self.fixed_height), pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
+            # ...then the joints
             timeout = self.movep((action_absolute["translate"], action_absolute["rotate"]))
             if timeout:
                 return timeout
