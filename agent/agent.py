@@ -55,7 +55,7 @@ class AgentPybullet(Agent):
     def __init__(self, asset_files_path):
         
         super().__init__(asset_files_path)
-        self.xyz_offset = np.array((0.1, 0.6, 0.01))  # offset in pybullet coordinates, location to place the objects into, found by trial and error
+        self.xyz_offset = np.array((-2.5, 2.5, 0.01))  # offset in pybullet coordinates, location to place the objects into, found by trial and error
         self.rpy_offset = np.array((0, 0, -90)) * np.pi/180.0 # same as above, just for rpy 
 
     def load_object_into_env(self, index):

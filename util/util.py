@@ -49,7 +49,7 @@ def rpy_to_quaternion(rpy):
     qw = np.cos(roll/2) * np.cos(pitch/2) * np.cos(yaw/2) + np.sin(roll/2) * np.sin(pitch/2) * np.sin(yaw/2)
     return [qx, qy, qz, qw]
 
-def quaternion_to_euler_angle(quat):
+def quaternion_to_rpy(quat):
     x, y, z, w = quat
     ysqr = y * y
 
