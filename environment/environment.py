@@ -182,9 +182,9 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                             computeForwardKinematics=True  # need to check if this is necessary, if not can be turned off for performance gain
             )
         return {
-            'position': np.array(tmp[0]),  # index 0 is linkWorldPosition,
-            'position_base':np.array(tmp2[0][:2]),  # only xy position of baselink
-            'rotation': np.array(quaternion_to_rpy(tmp[1]))  # index 1 is linkWorldOrientation as quaternion
+            'position': np.array(tmp[4]),  # index 4 is worldLinkWorldPosition,
+            'position_base':np.array(tmp2[4][:2]),  # only xy position of baselink
+            'rotation': np.array(quaternion_to_rpy(tmp[5]))  # index 5 is worldLinkWorldOrientation as quaternion
         }       
 
     def close(self):
@@ -243,12 +243,12 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
 
         if action is not None:
             # if relative movement is enabled, action must be transformed into absolute movement needed for robot control...
+            state = self._get_obs()
             new_state = OrderedDict()
             if self._relative_movement:
-                state = self._get_obs()
                 # unfortunately, the order of dict entries matters to the gym contains() method here
                 # if somehow the order dict entries in the observation space ordereddict changes, then the order of the next lines defining the entries of the new state needs to be switched as well
-                new_state["base_position"] = state["position_base"] + action["translate_base"]
+                new_state["position_base"] = state["position_base"] + action["translate_base"]
                 new_state["position"] = state["position"] + action["translate"]
                 new_state["rotation"] = state["rotation"] + action["rotate"]
                 """
@@ -268,12 +268,13 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                 new_state["rotation"] = rpy_to_quaternion(new_state["rotation"])
             # ....otherwise use it as is
             else:
-                new_state["base_position"] = action["translate_base"]
+                new_state["position_base"] = action["translate_base"]
                 new_state["position"] = action["translate"]
                 new_state["rotation"] = rpy_to_quaternion(action["rotate"])
 
-            # first move the base of the robot...
-            #pyb.resetBasePositionAndOrientation(self.robot, np.append(new_state["base_position"], self.fixed_height[self.robot_name]), pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
+            # first move the base of the robot...(but only if the new location is sufficiently different from the old one)
+            if np.linalg.norm(new_state["position_base"]-state["position_base"]) > 1e-4:
+                pyb.resetBasePositionAndOrientation(self.robot, np.append(new_state["position_base"], self.fixed_height[self.robot_name]), pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
             # ...then the joints
             timeout = self.movep((new_state["position"], new_state["rotation"]))
             if timeout:
@@ -334,7 +335,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             bodyUniqueId=self.robot,
             endEffectorLinkIndex=self.end_effector_link_id[self.robot_name],
             targetPosition=pose[0],
-            targetOrientation=pose[1],
+            targetOrientation=pose[1],0
             lowerLimits=self.joints_lower[self.robot_name],
             upperLimits=self.joints_upper[self.robot_name],
             jointRanges=self.joints_range[self.robot_name],

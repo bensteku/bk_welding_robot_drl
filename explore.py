@@ -16,7 +16,6 @@ print(a.dataset["filenames"][index])
 a.load_object_into_env(index)
 a._set_goals(index)
 print(a.goals[0])
-print(quaternion_to_rpy(a.goals[0]["target_rot"][0]))
 e.manual_control()
 
 for i in range(500000):

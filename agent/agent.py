@@ -6,7 +6,7 @@ import util.xml_parser
 from util import xml_parser, util
 from scipy.spatial.transform import Rotation
 
-PYBULLET_SCALE_FACTOR = 0.0001
+PYBULLET_SCALE_FACTOR = 0.0005
 
 class Agent:
 
@@ -57,6 +57,8 @@ class AgentPybullet(Agent):
         super().__init__(asset_files_path)
         self.xyz_offset = np.array((-2.5, 2.5, 0.01))  # offset in pybullet coordinates, location to place the objects into, found by trial and error
         self.rpy_offset = np.array((0, 0, -90)) * np.pi/180.0 # same as above, just for rpy 
+        self.torch_offset = np.array((2.95, 0, 0))
+        self.torch_offset = self.torch_offset + np.array((3.14159265359, 0, -1.57079632679))
 
     def load_object_into_env(self, index):
 
@@ -101,9 +103,9 @@ class AgentPybullet(Agent):
 
         for frame in frames:
             tmp = {}
-            tmp["weldseams"] = [rot @ (ele["position"] * PYBULLET_SCALE_FACTOR + self.xyz_offset) for ele in frame["weld_frames"]]
-            tmp["target_pos"] = [rot @ (ele[:3,3] * PYBULLET_SCALE_FACTOR + self.xyz_offset) for ele in frame["pose_frames"]]
-            tmp["target_rot"] = [util.matrix_to_quaternion(ele[:3,:3] @ rot) for ele in frame["pose_frames"]]
+            tmp["weldseams"] = [rot @ (ele["position"] * PYBULLET_SCALE_FACTOR) + self.xyz_offset for ele in frame["weld_frames"]]
+            tmp["target_pos"] = [rot @ (ele[:3,3] * PYBULLET_SCALE_FACTOR) + self.xyz_offset for ele in frame["pose_frames"]]
+            tmp["target_rot"] = [util.quaternion_to_rpy(util.matrix_to_quaternion(ele[:3,:3]))+self.rpy_offset+self.torch_offset for ele in frame["pose_frames"]]
             tmp["tool"] = 0 if frame["torch"] == "TAND_GERAD_DD" else 0
             
             self.goals.append(tmp)
