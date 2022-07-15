@@ -16,6 +16,7 @@ print(a.dataset["filenames"][index])
 a.load_object_into_env(index)
 a._set_goals(index)
 print(a.goals[0])
+print(e._get_obs())
 e.manual_control()
 
 for i in range(500000):
@@ -24,3 +25,6 @@ for i in range(500000):
     e.step(act)
 
 e.close()
+
+#(3.141040706425036, 6.011992523605185e-08, -1.5707967059192127)
+#(3.141040706425036, 6.011992523605185e-08, -1.5707967059192127)

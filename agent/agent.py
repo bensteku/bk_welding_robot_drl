@@ -5,6 +5,7 @@ import numpy as np
 import util.xml_parser
 from util import xml_parser, util
 from scipy.spatial.transform import Rotation
+import pybullet as pyb
 
 PYBULLET_SCALE_FACTOR = 0.0005
 
@@ -55,10 +56,10 @@ class AgentPybullet(Agent):
     def __init__(self, asset_files_path):
         
         super().__init__(asset_files_path)
-        self.xyz_offset = np.array((-2.5, 2.5, 0.01))  # offset in pybullet coordinates, location to place the objects into, found by trial and error
-        self.rpy_offset = np.array((0, 0, -90)) * np.pi/180.0 # same as above, just for rpy 
-        self.torch_offset = np.array((2.95, 0, 0))
-        self.torch_offset = self.torch_offset + np.array((3.14159265359, 0, -1.57079632679))
+        self.xyz_offset = np.array((-2.5, -2.5, 0.01))  # offset in pybullet coordinates, location to place the objects into, found by trial and error
+        self.torch_offset = pyb.invertTransform([0, 0, 0], pyb.getQuaternionFromEuler(np.array((2.95, 0, 0))))[1]
+        self.torch_offset = pyb.invertTransform([0, 0, 0], pyb.getQuaternionFromEuler(np.array((2.35, 0, 0))))[1]
+        self.ee_offset = pyb.invertTransform([0, 0, 0], pyb.getQuaternionFromEuler(np.array((3.14159265359, 0, -1.57079632679))))[1]
 
     def load_object_into_env(self, index):
 
@@ -66,7 +67,7 @@ class AgentPybullet(Agent):
             raise ValueError("env needs to be set before agent can act upon it!")
 
         self.env.add_object(os.path.join(self.asset_files_path, self.dataset["filenames"][index]), 
-        pose = (self.xyz_offset, util.rpy_to_quaternion(self.rpy_offset)),
+        pose = (self.xyz_offset, [0, 0, 0, 1]),
         category = "fixed" )
 
     def _register_data(self):
@@ -97,18 +98,15 @@ class AgentPybullet(Agent):
         """
 
         frames = self.dataset["frames"][index]
-
-        rot = Rotation.from_euler("XYZ", self.rpy_offset)
-        rot = rot.as_matrix()
-
+        id = 0
         for frame in frames:
             tmp = {}
-            tmp["weldseams"] = [rot @ (ele["position"] * PYBULLET_SCALE_FACTOR) + self.xyz_offset for ele in frame["weld_frames"]]
-            tmp["target_pos"] = [rot @ (ele[:3,3] * PYBULLET_SCALE_FACTOR) + self.xyz_offset for ele in frame["pose_frames"]]
-            tmp["target_rot"] = [util.quaternion_to_rpy(util.matrix_to_quaternion(ele[:3,:3]))+self.rpy_offset+self.torch_offset for ele in frame["pose_frames"]]
-            tmp["tool"] = 0 if frame["torch"] == "TAND_GERAD_DD" else 0
-            
+            tmp["weldseams"] = [ele["position"] * PYBULLET_SCALE_FACTOR + self.xyz_offset for ele in frame["weld_frames"]]
+            tmp["target_pos"] = [ele[:3,3] * PYBULLET_SCALE_FACTOR + self.xyz_offset for ele in frame["pose_frames"]]
+            tmp["target_rot"] = [util.matrix_to_quaternion(ele[:3,:3]) for ele in frame["pose_frames"]]
+            tmp["tool"] = 0 if frame["torch"] == "TAND_GERAD_DD" else 0           
             self.goals.append(tmp)
+            id +=1
     
     def reward(self):
         

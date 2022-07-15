@@ -1,4 +1,6 @@
 import numpy as np
+import pybullet as pyb
+import pyquaternion as pyq
 
 def matrix_to_quaternion(matrix):
     """Utility method to get quaternion from a 3x3 rotation matrix
@@ -11,9 +13,9 @@ def matrix_to_quaternion(matrix):
     """
 
     if type(matrix) == list:
-        m00, m01, m02, m10, m11, m12, m20, m21, m22 = matrix
+        m00, m10, m20, m01, m11, m21, m02, m12, m22 = matrix
     else:
-        m00, m01, m02, m10, m11, m12, m20, m21, m22 = matrix.flatten()
+        m00, m10, m20, m01, m11, m21, m02, m12, m22 = matrix.flatten()
     if (m22 < 0): 
         if (m00 >m11):
             t = 1 + m00 -m11 -m22
@@ -47,7 +49,7 @@ def rpy_to_quaternion(rpy):
     qy = np.cos(roll/2) * np.sin(pitch/2) * np.cos(yaw/2) + np.sin(roll/2) * np.cos(pitch/2) * np.sin(yaw/2)
     qz = np.cos(roll/2) * np.cos(pitch/2) * np.sin(yaw/2) - np.sin(roll/2) * np.sin(pitch/2) * np.cos(yaw/2)
     qw = np.cos(roll/2) * np.cos(pitch/2) * np.cos(yaw/2) + np.sin(roll/2) * np.sin(pitch/2) * np.sin(yaw/2)
-    return [qx, qy, qz, qw]
+    return np.array([qx, qy, qz, qw])
 
 def quaternion_to_rpy(quat):
     x, y, z, w = quat
@@ -70,3 +72,19 @@ def quaternion_to_rpy(quat):
     Z = np.arctan2(t3, t4)
 
     return X, Y, Z 
+
+def quaternion_multiply(quat1, quat2):
+    q1 = pyq.Quaternion(quat1[3], quat1[0], quat1[1], quat1[2])
+    q2 = pyq.Quaternion(quat2[3], quat2[0], quat2[1], quat2[2])
+
+    res = q1 * q2
+    im = res.imaginary
+    re = res.real
+    return [im[0], im[1], im[2], re]
+
+def quaternion_invert(quat):
+    q = pyq.Quaternion(quat[3], quat[0], quat[1], quat[2])
+    inv = q.inverse
+    im = inv.imaginary
+    re = inv.real
+    return [im[0], im[1], im[2], re]
