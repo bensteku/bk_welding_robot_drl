@@ -3,7 +3,7 @@ import gym
 import pybullet as pyb
 import time
 import numpy as np
-from util.util import matrix_to_quaternion, rpy_to_quaternion, quaternion_to_rpy, quaternion_multiply, quaternion_invert
+from util.util import matrix_to_quaternion, quaternion_diff, rpy_to_quaternion, quaternion_to_rpy, quaternion_multiply, quaternion_invert
 from collections import OrderedDict
 
 class WeldingEnvironment(gym.Env):
@@ -145,18 +145,6 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
 
         # load ground plane to hold objects in place
         pyb.loadURDF("workspace/plane.urdf", basePosition=[0, 0, -0.001])
-        
-        base_quat = [0,0,0,1]
-        #pyb.loadURDF("test.urdf", useFixedBase=True, baseOrientation=base_quat)
-        pose_quat = [ -0.7071068, 0.7071068, 0.000139, -0.000139 ]
-        rotate_quat = [ 0.9226898, 0, 0, 0.3855431 ]
-        end_quat = quaternion_multiply(pose_quat, rotate_quat)
-        end_quat = quaternion_multiply(base_quat, end_quat)
-        #pyb.loadURDF("test.urdf", useFixedBase=True, baseOrientation=end_quat)
-        pyb.loadURDF("test.urdf", useFixedBase=True, baseOrientation=[-0.27059805, -0.27059805,  0.65328148,  0.65328148])
-
-        #pyb.loadURDF("test.urdf", useFixedBase=True, baseOrientation=[-0.1765669, -0.4233322, 0.8201255, 0.3420647])
-        pyb.loadURDF("test.urdf", useFixedBase=True)
 
         # TODO: load in welding table
 
@@ -197,8 +185,9 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         return {
             'position': np.array(tmp[0]),  # index 4 is worldLinkWorldPosition,
             'position_base':np.array(tmp2[4][:2]),  # only xy position of baselink
-            #'rotation': pyb.multiplyTransforms([0,0,0],np.array(tmp[5]), [0,0,0], pyb.getQuaternionFromEuler(np.array((2.35, 0, 0))))[1]  # index 5 is worldLinkWorldOrientation as quaternion
-            'rotation': np.array(tmp[1])
+            'rotation_world': np.array(tmp[5]),  # index 5 is worldLinkWorldOrientation as quaternion
+            'rotation': np.array(tmp[1]),
+            'inertial': np.array(tmp[3])
         }       
 
     def close(self):
@@ -280,7 +269,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                 
                 # convert rpy to quaternion for pybullet processing
                 #new_state["rotation"] = pyb.multiplyTransforms([0,0,0], pyb.invertTransform([0,0,0], pyb.getQuaternionFromEuler(np.array((2.35, 0, 0))))[1], [0,0,0], pyb.getEulerFromQuaternion(new_state["rotation"]))[1]
-                new_state["rotation"] = quaternion_multiply(pyb.getQuaternionFromEuler(np.array((2.35, 0, 0))), pyb.getQuaternionFromEuler(new_state["rotation"]))
+                new_state["rotation"] = quaternion_multiply(pyb.getQuaternionFromEuler(np.array((2.35, 0, 0))), pyb.getQuaternionFromEuler(new_state["rotation"]))  # TODO
             # ....otherwise use it as is
             else:
                 new_state["position_base"] = action["translate_base"]
@@ -439,6 +428,16 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             "kr6": 2 #tbd
         }
 
+        # angles used to transform the coordinate system of of the end effector for usage in inverse kinematics
+        # such that the attached torch is positioned at [0, 0, 0, 1] exactly as it would be if loaded into the world separately
+        # this has the effect that the ground truth rotations from the xml files can be used as inputs without changes
+        # first array: MRW510, second array: TAND GERAD
+        self.ik_offset_angles = {
+            "ur5": [[0, 0, 0, 1], [0, 0, 0, 1]],  # tbd
+            "kr16": [[-0.2726201, 0.2726201, -0.6524402, -0.6524402], [-0.0676347, 0.0676347, -0.7038647, -0.7038647]],
+            "kr6": [0, 0, 0, 1]  # tbd
+        }
+
     def _init_gym_vars(self):
 
         #   contains the position (as xyz) and rotation (as roll-pitch-yaw rpy in radians) of the end effector (i.e. the welding torch) in workspace
@@ -488,9 +487,14 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         oldybase = 0
         oldxbase = 0
 
+        pyb.addUserDebugLine([0,0,0],[0,0,1],[0,0,1],parentObjectUniqueId=self.robot, parentLinkIndex= self.end_effector_link_id[self.robot_name])
+        pyb.addUserDebugLine([0,0,0],[0,1,0],[0,1,0],parentObjectUniqueId=self.robot, parentLinkIndex= self.end_effector_link_id[self.robot_name])
+        pyb.addUserDebugLine([0,0,0],[1,0,0],[1,0,0],parentObjectUniqueId=self.robot, parentLinkIndex= self.end_effector_link_id[self.robot_name])
+
         while True:
             if x_base != oldxbase or y_base != oldybase:
                 pyb.resetBasePositionAndOrientation(self.robot, np.array([x_base, y_base, self.fixed_height[self.robot_name]]), pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
+            # read inputs from GUI
             qxr = pyb.readUserDebugParameter(qx)
             qyr = pyb.readUserDebugParameter(qy)
             qzr = pyb.readUserDebugParameter(qz)
@@ -503,46 +507,21 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             x_base = pyb.readUserDebugParameter(fwdxIdbase)
             y_base = pyb.readUserDebugParameter(fwdyIdbase)
 
+            # build quaternion from user input
             command_quat = [qxr,qyr,qzr,qwr]
-            #pose_quat = self._get_obs()["rotation"]
-            joint_quat = [ 0.7071068, -0.7071068, 0, 0 ]
-            #joint_quat = [ 0.7071068, -0.7071068, 0, 0 ]
-            rotate_quat = [ 0.9226898, 0, 0, 0.3855431 ]
-            #pose_quat = quaternion_invert(pose_quat)
-            #rotate_quat = quaternion_invert(rotate_quat)
-            #joint_quat = quaternion_invert(joint_quat)
 
-            #print("joint quat")
-            #q = quaternion_multiply(joint_quat, rotate_quat)
-            #q =quaternion_multiply(quaternion_invert(joint_quat),rotate_quat)
-            #q =quaternion_multiply(joint_quat, quaternion_invert(rotate_quat))
-            #q =quaternion_multiply(quaternion_invert(joint_quat), quaternion_invert(rotate_quat)) #ganz gut
-            #print("rotate quat")
-            q=quaternion_multiply(rotate_quat, joint_quat) #gut
-            #q=quaternion_multiply(quaternion_invert(rotate_quat),joint_quat) #schlecht
-            #q=quaternion_multiply(quaternion_invert(rotate_quat), quaternion_invert(joint_quat)) #schlecht
-            #q=quaternion_multiply(rotate_quat, quaternion_invert(joint_quat)) #gut
-            #q=quaternion_multiply()
+            # get offset
+            offset = self.ik_offset_angles[self.robot_name][self.tool]
 
-            #end_command_quat = quaternion_multiply(q, command_quat)
-            #end_command_quat = quaternion_multiply(command_quat, quaternion_invert(q))
-            #end_command_quat = quaternion_multiply(command_quat, q)
-            #end_command_quat = quaternion_multiply(command_quat, quaternion_invert(q))
-            #end_command_quat = quaternion_multiply(quaternion_invert(q), command_quat)
+            # rotate the user input by the offset (the torch will now be positioned like when its original mesh is loaded by the loadURDF method if input is [0, 0, 0, 1])
+            middle_quat = quaternion_multiply(offset, command_quat)
+            # however, the coordinate system is still wrongly aligned, so we will have to switch systems by multiplying through the offset
+            # this will make it so that our input (command_quat) rotates around the axes of the world coordinate system instead of the off the world axes rotated by the offset
+            offset = quaternion_invert(offset)
+            command_quat = quaternion_multiply(offset, middle_quat)
+            command_quat = quaternion_multiply(command_quat, quaternion_invert(offset))
 
-            end_command_quat = quaternion_multiply(quaternion_invert(joint_quat),command_quat)
-            #end_command_quat = quaternion_multiply(quaternion_invert(rotate_quat), end_command_quat)
-            #end_command_quat = quaternion_multiply(joint_quat,command_quat)
-            #end_command_quat = quaternion_multiply(rotate_quat, end_command_quat)
-            end_command_quat = quaternion_multiply(quaternion_invert(rotate_quat), end_command_quat)
-            #end_command_quat = command_quat
-            
-            #print(joint_quat)
-            #print(quaternion_multiply(joint_quat,command_quat))
-            #print(end_command_quat)
-
-            self.movep(([x,y,z],end_command_quat))
-            print(self._get_obs())
+            self.movep(([x,y,z],command_quat))
 
 if __name__ == "__main__":
     e = WeldingEnvironmentPybullet("../assets/",True)

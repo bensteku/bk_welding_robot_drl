@@ -80,11 +80,15 @@ def quaternion_multiply(quat1, quat2):
     res = q1 * q2
     im = res.imaginary
     re = res.real
-    return [im[0], im[1], im[2], re]
+    return np.array([im[0], im[1], im[2], re])
 
 def quaternion_invert(quat):
     q = pyq.Quaternion(quat[3], quat[0], quat[1], quat[2])
     inv = q.inverse
     im = inv.imaginary
     re = inv.real
-    return [im[0], im[1], im[2], re]
+    return np.array([im[0], im[1], im[2], re])
+
+def quaternion_diff(quat1, quat2):
+    # return = quat2*inv(quat1) -> return*quat1=quat2, in words: which quaternion times quat1 results in quat2?
+    return np.array(quaternion_multiply(quat2, quaternion_invert(quat1)))
