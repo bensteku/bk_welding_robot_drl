@@ -50,16 +50,6 @@ class WeldingEnvironment(gym.Env):
 
         return self._get_obs(), reward, done, info
 
-    # helper method
-
-    def perform_action(self):
-
-        raise NotImplementedError
-
-    def _init_gym_vars(self):
-
-        raise NotImplementedError
-
     def close(self):
 
         raise NotImplementedError
@@ -68,7 +58,11 @@ class WeldingEnvironment(gym.Env):
     # other methods #
     #################
 
-    def perform_action(self):
+    def _perform_action(self):
+
+        raise NotImplementedError
+
+    def _init_gym_vars(self):
 
         raise NotImplementedError
 
@@ -125,10 +119,6 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         # set up the scene into the initial state
         self.reset()
 
-        # tmp section for quick testing, delete after complete implemetation
-        #input("waiting for button press")
-        #self.close()
-
     ###############
     # Gym methods #
     ###############
@@ -182,7 +172,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                             computeForwardKinematics=True  # need to check if this is necessary, if not can be turned off for performance gain
             )
         return {
-            'position': np.array(tmp[0]),  # index 4 is worldLinkWorldPosition,
+            'position': np.array(tmp[0]),
             'base_position':np.array(tmp2[4][:2]),  # only xy position of baselink
             'rotation': self._quat_ee_to_w(np.array(tmp[1]))  # the quaternion given by getLinkState is in ee frame, we transform it to world frame (because our target rotations are in world frame)
         }       
@@ -394,7 +384,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         # rotate the user input by the offset (the torch will now be positioned like when its original mesh is loaded by the loadURDF method if input is [0, 0, 0, 1])
         middle_quat = quaternion_multiply(offset, quat)
         # however, the coordinate system is still wrongly aligned, so we will have to switch systems by multiplying through the offset
-        # this will make it so that our input (command_quat) rotates around the axes of the world coordinate system instead of the off the world axes rotated by the offset
+        # this will make it so that our input (command_quat) rotates around the axes of the world coordinate system instead of the world axes rotated by the offset
         offset = quaternion_invert(offset)
         res = quaternion_multiply(offset, middle_quat)
         res = quaternion_multiply(res, quaternion_invert(offset))
@@ -406,7 +396,6 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         Same as above, just from end effector frame to world frame.
         """
 
-        # get offset
         offset = self.ik_offset_angles[self.robot_name][self.tool]
 
         tmp = quaternion_multiply(offset, quat)
@@ -437,8 +426,8 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         # end effector link id
         self.end_effector_link_id = {
             "ur5": 10,
-            "kr16": 7,  #subject to change, need to add invisible link for tool tip
-            "kr6": 6  # needs confirmation
+            "kr16": 7,
+            "kr6": 6  # tbd
         }
 
         # base link id
@@ -473,21 +462,21 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             "kr6": 2 #tbd
         }
 
-        # angles used to transform the coordinate system of of the end effector for usage in inverse kinematics
+        # angles used to transform the coordinate system of the end effector for usage in inverse kinematics
         # such that the attached torch is positioned at [0, 0, 0, 1] exactly as it would be if loaded into the world separately
         # this has the effect that the ground truth rotations from the xml files can be used as inputs without changes
         # first array: MRW510, second array: TAND GERAD
         self.ik_offset_angles = {
             "ur5": [[0, 0, 0, 1], [0, 0, 0, 1]],  # tbd
             "kr16": [[-0.2726201, 0.2726201, -0.6524402, -0.6524402], [-0.0676347, 0.0676347, -0.7038647, -0.7038647]],
-            "kr6": [0, 0, 0, 1]  # tbd
+            "kr6": [[0, 0, 0, 1], [0, 0, 0, 1]]  # tbd
         }
 
     def _init_gym_vars(self):
 
-        #   contains the position (as xyz) and rotation (as roll-pitch-yaw rpy in radians) of the end effector (i.e. the welding torch) in workspace
-        min_position = np.array([-4., -4., 0.005])  # provisional
-        max_position = np.array([4., 4, 1])
+        # contains the position (as xyz) and rotation (as quaternion) of the end effector (i.e. the welding torch) in world frame
+        min_position = np.array([-0.2, -0.2, 0.005])  # provisional
+        max_position = np.array([6., 6., 1])
         min_rotation = np.array([-1, -1, -1, -1])
         max_rotation = min_rotation * (-1)
 
@@ -554,24 +543,9 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
 
             # build quaternion from user input
             command_quat = [qxr,qyr,qzr,qwr]
-
-            """
-            # get offset
-            offset = self.ik_offset_angles[self.robot_name][self.tool]
-
-            # rotate the user input by the offset (the torch will now be positioned like when its original mesh is loaded by the loadURDF method if input is [0, 0, 0, 1])
-            middle_quat = quaternion_multiply(offset, command_quat)
-            # however, the coordinate system is still wrongly aligned, so we will have to switch systems by multiplying through the offset
-            # this will make it so that our input (command_quat) rotates around the axes of the world coordinate system instead of the off the world axes rotated by the offset
-            offset = quaternion_invert(offset)
-            command_quat = quaternion_multiply(offset, middle_quat)
-            command_quat = quaternion_multiply(command_quat, quaternion_invert(offset))
-            """
             command_quat = self._quat_w_to_ee(command_quat)
 
             self.movep(([x,y,z],command_quat))
 
 if __name__ == "__main__":
     e = WeldingEnvironmentPybullet("../assets/",True)
-
-#-0.27059805, -0.27059805,  0.65328148,  0.65328148
