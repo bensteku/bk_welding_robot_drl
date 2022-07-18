@@ -56,7 +56,7 @@ class AgentPybullet(Agent):
     def __init__(self, asset_files_path):
         
         super().__init__(asset_files_path)
-        self.xyz_offset = np.array((-2.5, -2.5, 0.01))  # offset in pybullet coordinates, location to place the objects into, found by trial and error
+        self.xyz_offset = np.array((0, 0, 0.01))  # offset in pybullet coordinates, location to place the objects into, found by trial and error
         self.torch_offset = pyb.invertTransform([0, 0, 0], pyb.getQuaternionFromEuler(np.array((2.95, 0, 0))))[1]
         self.torch_offset = pyb.invertTransform([0, 0, 0], pyb.getQuaternionFromEuler(np.array((2.35, 0, 0))))[1]
         self.ee_offset = pyb.invertTransform([0, 0, 0], pyb.getQuaternionFromEuler(np.array((3.14159265359, 0, -1.57079632679))))[1]
@@ -104,7 +104,7 @@ class AgentPybullet(Agent):
             tmp["weldseams"] = [ele["position"] * PYBULLET_SCALE_FACTOR + self.xyz_offset for ele in frame["weld_frames"]]
             tmp["target_pos"] = [ele[:3,3] * PYBULLET_SCALE_FACTOR + self.xyz_offset for ele in frame["pose_frames"]]
             tmp["target_rot"] = [util.matrix_to_quaternion(ele[:3,:3]) for ele in frame["pose_frames"]]
-            tmp["tool"] = 0 if frame["torch"] == "TAND_GERAD_DD" else 0           
+            tmp["tool"] = 1 if frame["torch"][3] == "TAND_GERAD_DD" else 0           
             self.goals.append(tmp)
             id +=1
     

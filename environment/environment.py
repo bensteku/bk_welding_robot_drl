@@ -1,4 +1,3 @@
-from cv2 import rotate
 import gym
 import pybullet as pyb
 import time
@@ -184,10 +183,8 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             )
         return {
             'position': np.array(tmp[0]),  # index 4 is worldLinkWorldPosition,
-            'position_base':np.array(tmp2[4][:2]),  # only xy position of baselink
-            'rotation_world': np.array(tmp[5]),  # index 5 is worldLinkWorldOrientation as quaternion
-            'rotation': np.array(tmp[1]),
-            'inertial': np.array(tmp[3])
+            'base_position':np.array(tmp2[4][:2]),  # only xy position of baselink
+            'rotation': self._quat_ee_to_w(np.array(tmp[1]))  # the quaternion given by getLinkState is in ee frame, we transform it to world frame (because our target rotations are in world frame)
         }       
 
     def close(self):
@@ -204,8 +201,8 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         Does nothing if desired tool is already attached.
 
         Args:
-            tool: int, 0 for TAND GERAD, 1 for MRW510
-            reset: bool, set to true if the self.reset() method is called right after, will prevent this method from reloading the robot
+            tool: int, 1 for TAND GERAD, 0 for MRW510
+            reset: bool, set this to true if the self.reset() method is called right after, will prevent this method from reloading the robot
                    because reset() is going to do that anyway
 
         Returns:
@@ -216,14 +213,14 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         else:
             self.tool = tool
 
-            # check if current joint state is suffieciently close to resting state
+            # check if current joint state is sufficiently close to resting state
             currj = [pyb.getJointState(self.robot, i)[0] for i in self.joints]
             currj = np.array(currj)
             diffj = self.resting_pose_angles[self.robot_name] - currj
             if not all(np.abs(diffj) < 1e-2):
                 return False
             else:
-                if not reset:  # don't reload the robot model to save performance when reset() is going to do it anyway
+                if reset:  # don't reload the robot model to save performance when reset() is going to do it anyway
                     return True
                 pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)
                 pyb.removeBody(self.robot)
@@ -250,10 +247,11 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             new_state = OrderedDict()
             if self._relative_movement:
                 # unfortunately, the order of dict entries matters to the gym contains() method here
-                # if somehow the order dict entries in the observation space ordereddict changes, then the order of the next lines defining the entries of the new state needs to be switched as well
-                new_state["position_base"] = state["position_base"] + action["translate_base"]
+                # if somehow the order of dict entries in the observation space OrderedDict changes, then the order of the next lines defining the entries of the new state needs to be switched as well
+                new_state["base_position"] = state["base_position"] + action["translate_base"]
                 new_state["position"] = state["position"] + action["translate"]
                 new_state["rotation"] = state["rotation"] + action["rotate"]
+                new_state["rotation"] = self._quat_w_to_ee(new_state["rotation"])
                 """
                 print("state")
                 print(state)
@@ -263,22 +261,23 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                 print(new_state)
                 print("enthalten")
                 print(self.observation_space.contains(new_state))
-                """                
+                print("beispiel")
+                print(self.observation_space.sample())
+                """               
                 if not self.observation_space.contains(new_state):
                     return False  # if the current state+action results in invalid state, return false and do nothing
                 
-                # convert rpy to quaternion for pybullet processing
-                #new_state["rotation"] = pyb.multiplyTransforms([0,0,0], pyb.invertTransform([0,0,0], pyb.getQuaternionFromEuler(np.array((2.35, 0, 0))))[1], [0,0,0], pyb.getEulerFromQuaternion(new_state["rotation"]))[1]
-                new_state["rotation"] = quaternion_multiply(pyb.getQuaternionFromEuler(np.array((2.35, 0, 0))), pyb.getQuaternionFromEuler(new_state["rotation"]))  # TODO
             # ....otherwise use it as is
             else:
-                new_state["position_base"] = action["translate_base"]
+                new_state["base_position"] = action["translate_base"]
                 new_state["position"] = action["translate"]
-                new_state["rotation"] = rpy_to_quaternion(action["rotate"])
+                new_state["rotation"] = self._quat_w_to_ee(new_state["rotation"])
+                if not self.observation_space.contains(new_state):
+                    return False  # if the new state is invalid, return false and do nothing
 
             # first move the base of the robot...(but only if the new location is sufficiently different from the old one)
-            if np.linalg.norm(new_state["position_base"]-state["position_base"]) > 1e-4:
-                pyb.resetBasePositionAndOrientation(self.robot, np.append(new_state["position_base"], self.fixed_height[self.robot_name]), pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
+            if np.linalg.norm(new_state["base_position"]-state["base_position"]) > 1e-4:
+                pyb.resetBasePositionAndOrientation(self.robot, np.append(new_state["base_position"], self.fixed_height[self.robot_name]), pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
             # ...then the joints
             timeout = self.movep((new_state["position"], new_state["rotation"]))
             if timeout:
@@ -301,7 +300,9 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
 
     # methods taken almost 1:1 from ravens code, need to add proper attribution later TODO
     def movej(self, targj, speed=0.05, timeout=0.5):
-        """Move UR5 to target joint configuration."""
+        """
+        Move UR5 to target joint configuration.
+        """
 
         t0 = time.time()
         while (time.time() - t0) < timeout:
@@ -327,13 +328,17 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         return True 
 
     def movep(self, pose, speed=0.01):
-        """Move UR5 to target end effector pose."""
+        """
+        Move UR5 to target end effector pose.
+        """
 
         targj = self.solve_ik(pose)
         return self.movej(targj, speed)
 
     def solve_ik(self, pose):
-        """Calculate joint configuration with inverse kinematics."""
+        """
+        Calculate joint configuration with inverse kinematics.
+        """
 
         joints = pyb.calculateInverseKinematics(
             bodyUniqueId=self.robot,
@@ -352,14 +357,18 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
 
     @property
     def is_static(self):
-        """Return true if objects are no longer moving."""
+        """
+        Return true if objects are no longer moving.
+        """
 
         v = [np.linalg.norm(pyb.getBaseVelocity(i)[0])
             for i in self.obj_ids['rigid']]
         return all(np.array(v) < 5e-3)
 
     def add_object(self, urdf, pose, category='rigid'):
-        """List of (fixed, rigid, or deformable) objects in env."""
+        """
+        List of (fixed, rigid, or deformable) objects in env.
+        """
 
         fixed_base = 1 if category == 'fixed' else 0
         pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)
@@ -371,6 +380,42 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         self.obj_ids[category].append(obj_id)
         pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
         return obj_id
+
+    def _quat_w_to_ee(self, quat):
+        """
+        Takes an input quaternion in the world frame, rotates it such that it offsets the rotation of the welding torch
+        (meaning that a 0,0,0,1 input quaternion for the robot arm ee results in the same pose of the torch as loading it with the loadURDF method) 
+        and transforms it into the end effector frame (meaning that that inputs result in the correct rotation w.r.t the world frame)
+        """
+
+        # get offset
+        offset = self.ik_offset_angles[self.robot_name][self.tool]
+
+        # rotate the user input by the offset (the torch will now be positioned like when its original mesh is loaded by the loadURDF method if input is [0, 0, 0, 1])
+        middle_quat = quaternion_multiply(offset, quat)
+        # however, the coordinate system is still wrongly aligned, so we will have to switch systems by multiplying through the offset
+        # this will make it so that our input (command_quat) rotates around the axes of the world coordinate system instead of the off the world axes rotated by the offset
+        offset = quaternion_invert(offset)
+        res = quaternion_multiply(offset, middle_quat)
+        res = quaternion_multiply(res, quaternion_invert(offset))
+
+        return res
+
+    def _quat_ee_to_w(self, quat):
+        """
+        Same as above, just from end effector frame to world frame.
+        """
+
+        # get offset
+        offset = self.ik_offset_angles[self.robot_name][self.tool]
+
+        tmp = quaternion_multiply(offset, quat)
+        tmp = quaternion_multiply(tmp, quaternion_invert(offset))
+
+        res = quaternion_multiply(quaternion_invert(offset), tmp)
+
+        return res
+
 
     ###################
     # utility methods #
@@ -441,9 +486,9 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
     def _init_gym_vars(self):
 
         #   contains the position (as xyz) and rotation (as roll-pitch-yaw rpy in radians) of the end effector (i.e. the welding torch) in workspace
-        min_position = np.array([-4., -4., 0.05])  # provisional
+        min_position = np.array([-4., -4., 0.005])  # provisional
         max_position = np.array([4., 4, 1])
-        min_rotation = np.array([-1, -1, -1, -1]) * np.pi/180
+        min_rotation = np.array([-1, -1, -1, -1])
         max_rotation = min_rotation * (-1)
 
         self.observation_space = gym.spaces.Dict(
@@ -460,8 +505,8 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         if self._relative_movement:
             min_position = np.array([-0.01, -0.01, -0.01])  # provisional
             max_position = -1 * min_position
-            min_rotation = np.array([-0.001, -0.001, -0.001, -0.001]) * np.pi/180
-            max_rotation = np.array([0.001, 0.001, 0.001, 0.001]) * np.pi/180
+            min_rotation = np.array([-0.001, -0.001, -0.001, -0.001])
+            max_rotation = np.array([0.001, 0.001, 0.001, 0.001])
 
         self.action_space = gym.spaces.Dict(
             {
@@ -510,6 +555,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             # build quaternion from user input
             command_quat = [qxr,qyr,qzr,qwr]
 
+            """
             # get offset
             offset = self.ik_offset_angles[self.robot_name][self.tool]
 
@@ -520,6 +566,8 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             offset = quaternion_invert(offset)
             command_quat = quaternion_multiply(offset, middle_quat)
             command_quat = quaternion_multiply(command_quat, quaternion_invert(offset))
+            """
+            command_quat = self._quat_w_to_ee(command_quat)
 
             self.movep(([x,y,z],command_quat))
 
