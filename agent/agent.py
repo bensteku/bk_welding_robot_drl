@@ -2,9 +2,9 @@ import environment.environment as env
 import xml.etree.ElementTree as ET
 import os
 import numpy as np
-import util.xml_parser
 from util import xml_parser, util
 from scipy.spatial.transform import Rotation
+from collections import OrderedDict
 import pybullet as pyb
 
 PYBULLET_SCALE_FACTOR = 0.0005
@@ -18,10 +18,12 @@ class Agent:
         self.dataset = self._register_data()
 
         # state variable, 0: pathing, 1: welding
-        self.pathing_or_welding = 0  
+        self.welding = 0  
 
         # array of goals (start and finish positions per weld seam)
         self.goals = []
+        self.current_objective = None
+        self.next_target_pos = None
 
         # welding environment as defined in the other file, needs to be set after construction due to mutual dependence
         self.env = None
@@ -34,7 +36,7 @@ class Agent:
 
         self.env = senv
 
-    def _register_dataset(self):
+    def _register_data(self):
         """
         To be implemented in the subclasses.
         Should return dict with two keys: files with list of source files as value & frames with data from xml files given by xml_parser
@@ -56,10 +58,7 @@ class AgentPybullet(Agent):
     def __init__(self, asset_files_path):
         
         super().__init__(asset_files_path)
-        self.xyz_offset = np.array((0, 0, 0.01))  # offset in pybullet coordinates, location to place the objects into, found by trial and error
-        self.torch_offset = pyb.invertTransform([0, 0, 0], pyb.getQuaternionFromEuler(np.array((2.95, 0, 0))))[1]
-        self.torch_offset = pyb.invertTransform([0, 0, 0], pyb.getQuaternionFromEuler(np.array((2.35, 0, 0))))[1]
-        self.ee_offset = pyb.invertTransform([0, 0, 0], pyb.getQuaternionFromEuler(np.array((3.14159265359, 0, -1.57079632679))))[1]
+        self.xyz_offset = np.array((0, 0, 0.01))  # offset in pybullet coordinates, location to place the objects into
 
     def load_object_into_env(self, index):
 
@@ -98,19 +97,28 @@ class AgentPybullet(Agent):
         """
 
         frames = self.dataset["frames"][index]
-        id = 0
         for frame in frames:
             tmp = {}
             tmp["weldseams"] = [ele["position"] * PYBULLET_SCALE_FACTOR + self.xyz_offset for ele in frame["weld_frames"]]
+            tmp["norm"] = [ele["norm"] for ele in frame["weld_frames"]]
             tmp["target_pos"] = [ele[:3,3] * PYBULLET_SCALE_FACTOR + self.xyz_offset for ele in frame["pose_frames"]]
             tmp["target_rot"] = [util.matrix_to_quaternion(ele[:3,:3]) for ele in frame["pose_frames"]]
             tmp["tool"] = 1 if frame["torch"][3] == "TAND_GERAD_DD" else 0           
             self.goals.append(tmp)
-            id +=1
-    
-    def reward(self):
+
+    def is_done(self):
+        if self.goals:
+            return False
+        else:
+            return True
+
+    def _set_objective(self):
+        """
+        Method for translating elements of goal array into concrete instructions for actions
+        """
+
+        objs = self.goals.pop(0)
         
-        return None
 
 
 class AgentPybulletDemonstration(AgentPybullet):
@@ -175,4 +183,59 @@ class AgentPybulletDemonstration(AgentPybullet):
                 reward = self.reward()
 
         
+class AgentPybulletOracle(AgentPybulletDemonstration):
+    """
+    Agent without NN that uses the ground truth to approximate an optimal trajectory, used to generate dataset
+    """
+
+    def __init__(self, asset_files_path):
         
+        super().__init__(asset_files_path)
+
+    def act(self, obs=None):
+
+        if not obs:
+            return None
+
+        if not self.current_objective:
+            self.current_objective = self.goals.pop(0)
+        if not self.next_target_pos:
+            # simple approximation of a suitable base position by averaging the all weldseams
+            base_position_apx = np.average(self.current_objective["weldseams"], axis=0)
+            self.next_target_pos = {"base_pos_target": base_position_apx[:2], "ee_pos_target": self.current_objective["target_pos"].pop(0), "ee_rot_target": self.current_objective["target_rot"].pop(0)}
+
+        # base difference
+        base_diff = self.next_target_pos["base_pos_target"] - obs["base_position"]
+        base_diff_norm = np.linalg.norm(base_diff)
+        if base_diff_norm > self.env.base_speed:
+            base_diff_direction =  base_diff / np.linalg.norm(base_diff)
+            base_position_command = base_diff_direction * self.env.base_speed
+        else:
+            base_position_command = base_diff
+
+        # ee difference
+        ee_diff = self.next_target_pos["ee_pos_target"] - obs["position"]
+        ee_diff_norm = np.linalg.norm(ee_diff)
+        if ee_diff_norm > self.env.pos_speed:
+            ee_diff_direction =  ee_diff / np.linalg.norm(ee_diff)
+            ee_position_command = ee_diff_direction * self.env.pos_speed
+        else:
+            ee_position_command = ee_diff
+
+        # ee difference
+        quat_diff = self.next_target_pos["ee_rot_target"] - obs["rotation"]
+        quat_diff_norm = np.linalg.norm(quat_diff)
+        if quat_diff_norm > self.env.pos_speed:
+            quat_diff_direction =  quat_diff / np.linalg.norm(quat_diff)
+            quat_position_command = quat_diff_direction * self.env.pos_speed
+        else:
+            quat_position_command = quat_diff
+        
+        action = OrderedDict()
+        action["translate_base"] = base_position_command
+        action["translate"] = ee_position_command
+        action["rotate"] = quat_position_command
+        
+        return action
+
+

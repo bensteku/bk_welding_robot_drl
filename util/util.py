@@ -92,3 +92,10 @@ def quaternion_invert(quat):
 def quaternion_diff(quat1, quat2):
     # return = quat2*inv(quat1) -> return*quat1=quat2, in words: which quaternion times quat1 results in quat2?
     return np.array(quaternion_multiply(quat2, quaternion_invert(quat1)))
+
+def quaternion_norm(quat):
+    return np.linalg.norm(quat)
+
+def quaternion_normalize(quat):
+    return quat / quaternion_norm(quat)
+    

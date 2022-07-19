@@ -17,7 +17,7 @@ class WeldingEnvironment(gym.Env):
         # variables needed by Gym env subclasses, set by method to be implemented by subclasses
         self._init_gym_vars()
 
-        # agent, needs to be set after construction due to mutual dependence
+        # agent
         self.agent = agent
         self.agent._set_env(self)
 
@@ -46,7 +46,7 @@ class WeldingEnvironment(gym.Env):
         if timeout:
             return self._get_obs(), 0, False, None
         reward, info = self.calc_reward() if action is not None else (0, {})
-        done = self.is_done()
+        done = self.agent.is_done()
 
         return self._get_obs(), reward, done, info
 
@@ -253,7 +253,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                 print(self.observation_space.contains(new_state))
                 print("beispiel")
                 print(self.observation_space.sample())
-                """               
+                """              
                 if not self.observation_space.contains(new_state):
                     return False  # if the current state+action results in invalid state, return false and do nothing
                 
@@ -419,7 +419,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         # angles for the default pose of the robot, found by trial and error
         self.resting_pose_angles = {  
             "ur5": np.array([-1, -0.5, 0.5, -0.5, -0.5, 0]) * np.pi,
-            "kr16": np.array([0, -0.5, 0.5, -1, 0.5, 0.5]) * np.pi,
+            "kr16": np.array([0, -0.5, 0.75, -1, 0.5, 0.5]) * np.pi,
             "kr6": np.array([-1, -0.5, 0.5, -0.5, -0.5, 0]) * np.pi # copied from ur5, needs to be adjusted
         }
 
@@ -475,7 +475,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
     def _init_gym_vars(self):
 
         # contains the position (as xyz) and rotation (as quaternion) of the end effector (i.e. the welding torch) in world frame
-        min_position = np.array([-0.2, -0.2, 0.005])  # provisional
+        min_position = np.array([-0.2, -0.2, 0.001])  # provisional
         max_position = np.array([6., 6., 1])
         min_rotation = np.array([-1, -1, -1, -1])
         max_rotation = min_rotation * (-1)
@@ -492,15 +492,19 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         # if relative_movement is true, then actions consists of additional movements
         # if it is false, then they consist of positions to be reached
         if self._relative_movement:
-            min_position = np.array([-0.01, -0.01, -0.01])  # provisional
-            max_position = -1 * min_position
+            self.pos_speed = 0.01  # provisional
+            self.base_speed = 10 * self.pos_speed
+            min_position = np.array([-self.pos_speed, -self.pos_speed, -self.pos_speed])  
+            max_position = min_position * -1
+            min_position_base = np.array([-self.base_speed, -self.base_speed, -self.base_speed]) 
+            max_position_base = min_position_base * -1
             min_rotation = np.array([-0.001, -0.001, -0.001, -0.001])
             max_rotation = np.array([0.001, 0.001, 0.001, 0.001])
 
         self.action_space = gym.spaces.Dict(
             {
                 'translate': gym.spaces.Box(low=min_position, high=max_position, shape=(3,), dtype=np.float32),
-                'translate_base': gym.spaces.Box(low=min_position[:2], high=max_position[:2], shape=(2,), dtype=np.float32),
+                'translate_base': gym.spaces.Box(low=min_position_base[:2], high=max_position_base[:2], shape=(2,), dtype=np.float32),
                 'rotate': gym.spaces.Box(low=min_rotation, high=max_rotation, shape=(4,), dtype=np.float32)
             }
         )
