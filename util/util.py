@@ -99,3 +99,35 @@ def quaternion_norm(quat):
 def quaternion_normalize(quat):
     return quat / quaternion_norm(quat)
     
+def quaternion_interpolate(quat1, quat2, n):
+    q1 = pyq.Quaternion(quat1[3], quat1[0], quat1[1], quat1[2])
+    q2 = pyq.Quaternion(quat2[3], quat2[0], quat2[1], quat2[2])
+
+    res = pyq.Quaternion.intermediates(q1, q2, n, include_endpoints=True)
+    res = list(res)
+    res = [np.array([q[1], q[2], q[3], q[0]]) for q in res]
+    return res
+
+def pos_interpolate(pos1, pos2, speed):
+
+    delta = pos2 - pos1
+    delta_norm = np.linalg.norm(delta)
+
+    if delta_norm <= speed:
+        return [pos2]
+    else:
+        segments = delta_norm / speed
+        delta = delta / delta_norm
+        delta = delta * speed
+        res = []
+        cur = pos1
+        counter = 1
+        while counter <= int(segments):
+            cur = cur + delta
+            res.append(cur)
+            counter += 1
+        # add missing piece to final position
+        missing_mul = segments - int(segments)
+        cur = cur + missing_mul * delta
+        res.append(cur)
+        return res

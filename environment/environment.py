@@ -261,8 +261,9 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             else:
                 new_state["base_position"] = action["translate_base"]
                 new_state["position"] = action["translate"]
-                new_state["rotation"] = self._quat_w_to_ee(new_state["rotation"])
+                new_state["rotation"] = self._quat_w_to_ee(action["rotate"])
                 if not self.observation_space.contains(new_state):
+                    print("problem")
                     return False  # if the new state is invalid, return false and do nothing
 
             # first move the base of the robot...(but only if the new location is sufficiently different from the old one)
@@ -477,8 +478,12 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         # contains the position (as xyz) and rotation (as quaternion) of the end effector (i.e. the welding torch) in world frame
         min_position = np.array([-0.2, -0.2, 0.001])  # provisional
         max_position = np.array([6., 6., 1])
+        min_position_base = np.array([-0.2, -0.2, 0.001]) 
+        max_position_base = np.array([6., 6., 1])
         min_rotation = np.array([-1, -1, -1, -1])
         max_rotation = min_rotation * (-1)
+        self.pos_speed = 0.01  # provisional
+        self.base_speed = 10 * self.pos_speed
 
         self.observation_space = gym.spaces.Dict(
             {
@@ -492,8 +497,6 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         # if relative_movement is true, then actions consists of additional movements
         # if it is false, then they consist of positions to be reached
         if self._relative_movement:
-            self.pos_speed = 0.01  # provisional
-            self.base_speed = 10 * self.pos_speed
             min_position = np.array([-self.pos_speed, -self.pos_speed, -self.pos_speed])  
             max_position = min_position * -1
             min_position_base = np.array([-self.base_speed, -self.base_speed, -self.base_speed]) 

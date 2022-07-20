@@ -20,10 +20,12 @@ class Agent:
         # state variable, 0: pathing, 1: welding
         self.welding = 0  
 
-        # array of goals (start and finish positions per weld seam)
+        # goals: overall collection of weldseams that are left to be dealt with
+        # objective: the weldseam that is currently being dealt with
+        # plan: concrete collection of robot commands to achieve (the next part of) the objective
         self.goals = []
-        self.current_objective = None
-        self.next_target_pos = None
+        self.objective = None
+        self.plan = None
 
         # welding environment as defined in the other file, needs to be set after construction due to mutual dependence
         self.env = None
@@ -191,51 +193,119 @@ class AgentPybulletOracle(AgentPybulletDemonstration):
     def __init__(self, asset_files_path):
         
         super().__init__(asset_files_path)
+        self.current_weldseam = 0
 
     def act(self, obs=None):
 
         if not obs:
             return None
 
-        if not self.current_objective:
-            self.current_objective = self.goals.pop(0)
-        if not self.next_target_pos:
-            # simple approximation of a suitable base position by averaging the all weldseams
-            base_position_apx = np.average(self.current_objective["weldseams"], axis=0)
-            self.next_target_pos = {"base_pos_target": base_position_apx[:2], "ee_pos_target": self.current_objective["target_pos"].pop(0), "ee_rot_target": self.current_objective["target_rot"].pop(0)}
+        # nomenclature:
+        # goals: overall collection of weldseams that are left to be dealt with
+        # objective: the weldseam that is currently being dealt with
+        # plan: concrete collection of robot commands to achieve (a part of) the objective
 
-        # base difference
-        base_diff = self.next_target_pos["base_pos_target"] - obs["base_position"]
-        base_diff_norm = np.linalg.norm(base_diff)
-        if base_diff_norm > self.env.base_speed:
-            base_diff_direction =  base_diff / np.linalg.norm(base_diff)
-            base_position_command = base_diff_direction * self.env.base_speed
-        else:
-            base_position_command = base_diff
-
-        # ee difference
-        ee_diff = self.next_target_pos["ee_pos_target"] - obs["position"]
-        ee_diff_norm = np.linalg.norm(ee_diff)
-        if ee_diff_norm > self.env.pos_speed:
-            ee_diff_direction =  ee_diff / np.linalg.norm(ee_diff)
-            ee_position_command = ee_diff_direction * self.env.pos_speed
-        else:
-            ee_position_command = ee_diff
-
-        # ee difference
-        quat_diff = self.next_target_pos["ee_rot_target"] - obs["rotation"]
-        quat_diff_norm = np.linalg.norm(quat_diff)
-        if quat_diff_norm > self.env.pos_speed:
-            quat_diff_direction =  quat_diff / np.linalg.norm(quat_diff)
-            quat_position_command = quat_diff_direction * self.env.pos_speed
-        else:
-            quat_position_command = quat_diff
+        if not self.plan:
+            if not self._set_plan(obs):
+                return None
+        #print(self.plan)
+        #input("wait a minute")
         
-        action = OrderedDict()
-        action["translate_base"] = base_position_command
-        action["translate"] = ee_position_command
-        action["rotate"] = quat_position_command
-        
-        return action
+        return self.plan.pop(0)
 
+    def _set_objective(self):
+        # maybe safeguard against empty goals list here TODO
+        if self.goals:
+            self.objective = self.goals.pop(0)
+            return True
+        else:
+            return False
 
+    def _set_plan(self, obs):
+        if not self.goals:
+            return False
+        else:
+            objective = self.goals.pop(0)
+            self.plan = []
+            for idx in range(len(objective["weldseams"])-1):
+                # general approach: first move the base inbetween the weldseam, then move the end effector to start point
+                # then to end point, then move ee back up, then repeat for next seam
+                
+                # 1. move base:
+                # approximate a good position for the robot base for the next weldseam by averaging between start and endpoint
+                base_position_apx = np.average(objective["weldseams"][idx:idx+2], axis=0)[:2]
+                # get a linear interpolation from current base pos to this estimate
+                base_position_todo = util.pos_interpolate(obs["base_position"], base_position_apx, self.env.base_speed)
+                # create an array of ee actions such that the ee keeps up with the base
+                ee_pos_during_base_movement = [np.array([ele[0], ele[1], 0.5]) for ele in base_position_todo]
+                ee_pos_after_base_movement = ee_pos_during_base_movement[-1]  # save for later
+                ee_rot_during_base_movement = [obs["rotation"] for ele in base_position_todo]
+                if self.env._relative_movement:
+                    # convert to relative movement if needed
+                    base_position_todo = [(base_position_todo[i]-base_position_todo[i-1] if i>0 else base_position_todo[0]-obs["base_position"]) for i in range(len(base_position_todo))]
+                    ee_pos_during_base_movement = [(ee_pos_during_base_movement[i]-ee_pos_during_base_movement[i-1] if i>0 else ee_pos_during_base_movement[0]-obs["position"]) for i in range(len(ee_pos_during_base_movement))]
+                    ee_rot_during_base_movement = [np.array([0, 0, 0, 0]) for i in range(len(ee_pos_during_base_movement))]
+                for i in range(len(base_position_todo)):
+                    act = OrderedDict()
+                    act["translate_base"] = base_position_todo[i]
+                    act["translate"] = ee_pos_during_base_movement[i]
+                    act["rotate"] = ee_rot_during_base_movement[i]
+                    self.plan.append(act)
+
+                # 2. move ee to start position
+                # get linear interpolation to start position
+                ee_pos_todo = util.pos_interpolate(ee_pos_after_base_movement, objective["weldseams"][idx], self.env.pos_speed)
+                ee_pos_at_welding_start = ee_pos_todo[-1]  # save for later
+                base_position_todo = [base_position_apx for i in range(len(ee_pos_todo))]
+                # get slerp interpolation of rotations to start rotation
+                ee_rot_todo = util.quaternion_interpolate(obs["rotation"], objective["target_rot"][idx], max(len(ee_pos_todo)-2,0))
+                if self.env._relative_movement:
+                    # convert to relative movement if needed
+                    ee_pos_todo = [(ee_pos_todo[i]-ee_pos_todo[i-1] if i>0 else ee_pos_todo[0]-ee_pos_after_base_movement) for i in range(len(ee_pos_todo))]
+                    ee_rot_todo = [(ee_rot_todo[i]-ee_rot_todo[i-1] if i>0 else ee_rot_todo[0]-obs["rotation"]) for i in range(len(ee_rot_todo))]
+                    base_position_todo = [np.array([0, 0]) for i in range(len(ee_pos_todo))]
+                for i in range(len(base_position_todo)):
+                    act = OrderedDict()
+                    act["translate_base"] = base_position_todo[i]
+                    act["translate"] = ee_pos_todo[i]
+                    act["rotate"] = ee_rot_todo[i]
+                    self.plan.append(act)
+
+                # 3. move ee to end position
+                # get linear interpolation to end position
+                ee_pos_todo = util.pos_interpolate(ee_pos_at_welding_start, objective["weldseams"][idx+1], self.env.pos_speed/5)
+                ee_pos_at_welding_end = ee_pos_todo[-1]
+                base_position_todo = [base_position_apx for i in range(len(ee_pos_todo))]
+                # get slerp interpolation of rotations to end rotation
+                ee_rot_todo = util.quaternion_interpolate(objective["target_rot"][idx], objective["target_rot"][idx+1], max(len(ee_pos_todo)-2,0))
+                if self.env._relative_movement:
+                    # convert to relative movement if needed
+                    ee_pos_todo = [(ee_pos_todo[i]-ee_pos_todo[i-1] if i>0 else ee_pos_todo[0]-ee_pos_at_welding_start) for i in range(len(ee_pos_todo))]
+                    ee_rot_todo = [(ee_rot_todo[i]-ee_rot_todo[i-1] if i>0 else ee_rot_todo[0]-objective["target_rot"][idx]) for i in range(len(ee_rot_todo))]
+                    base_position_todo = [np.array([0, 0]) for i in range(len(ee_pos_todo))]
+                for i in range(len(base_position_todo)):
+                    act = OrderedDict()
+                    act["translate_base"] = base_position_todo[i]
+                    act["translate"] = ee_pos_todo[i]
+                    act["rotate"] = ee_rot_todo[i]
+                    self.plan.append(act)
+
+                # 4. move ee upwards
+                # get linear interpolation to end position
+                ee_pos_todo = util.pos_interpolate(ee_pos_at_welding_end, np.array([ee_pos_at_welding_end[0], ee_pos_at_welding_end[1], 0.5]), self.env.pos_speed)
+                base_position_todo = [base_position_apx for i in range(len(ee_pos_todo))]
+                ee_rot_todo = [objective["target_rot"][idx+1] for ele in base_position_todo]
+                if self.env._relative_movement:
+                    # convert to relative movement if needed
+                    ee_pos_todo = [(ee_pos_todo[i]-ee_pos_todo[i-1] if i>0 else ee_pos_todo[0]-ee_pos_at_welding_end) for i in range(len(ee_pos_todo))]
+                    ee_rot_todo = [np.array([0, 0, 0, 1]) for i in range(len(ee_rot_todo))]
+                    base_position_todo = [np.array([0, 0]) for i in range(len(ee_pos_todo))]
+                for i in range(len(base_position_todo)):
+                    act = OrderedDict()
+                    act["translate_base"] = base_position_todo[i]
+                    act["translate"] = ee_pos_todo[i]
+                    act["rotate"] = ee_rot_todo[i]
+                    self.plan.append(act)
+            
+            
+            return True
