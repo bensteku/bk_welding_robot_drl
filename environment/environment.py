@@ -45,7 +45,7 @@ class WeldingEnvironment(gym.Env):
         timeout = self._perform_action(action)
         if timeout:
             return self._get_obs(), 0, False, None
-        reward, info = self.calc_reward() if action is not None else (0, {})
+        reward, info = self.reward() if action is not None else (0, {})
         done = self.agent.is_done()
 
         return self._get_obs(), reward, done, info
@@ -185,15 +185,13 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
     # methods for dealing with pybullet environment #
     #################################################
 
-    def switch_tool(self, tool, reset=False):
+    def switch_tool(self, tool):
         """
         Switches out the welding torch, but only if the robot is very close to default configuration.
         Does nothing if desired tool is already attached.
 
         Args:
             tool: int, 1 for TAND GERAD, 0 for MRW510
-            reset: bool, set this to true if the self.reset() method is called right after, will prevent this method from reloading the robot
-                   because reset() is going to do that anyway
 
         Returns:
             True if switching completed, False if robot not in proper position or desired tool already attached
@@ -206,25 +204,26 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             # check if current joint state is sufficiently close to resting state
             currj = [pyb.getJointState(self.robot, i)[0] for i in self.joints]
             currj = np.array(currj)
-            diffj = self.resting_pose_angles[self.robot_name] - currj
-            if not all(np.abs(diffj) < 1e-2):
-                return False
-            else:
-                if reset:  # don't reload the robot model to save performance when reset() is going to do it anyway
-                    return True
-                pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)
-                pyb.removeBody(self.robot)
-                if not self.tool:
-                    self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_mrw510.urdf", useFixedBase=True, basePosition=[0, 0, self.fixed_height[self.robot_name]], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
-                else:
-                    self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_tand_gerad.urdf", useFixedBase=True, basePosition=[0, 0, self.fixed_height[self.robot_name]], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
-                joints = [pyb.getJointInfo(self.robot, i) for i in range(pyb.getNumJoints(self.robot))]
-                self.joints = [j[0] for j in joints if j[2] == pyb.JOINT_REVOLUTE]
-                for i in range(len(self.joints)):
-                    pyb.resetJointState(self.robot, self.joints[i], self.resting_pose_angles[self.robot_name][i])
-                pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
 
-                return True
+            base_pos = self._get_obs()["base_position"]
+
+            self.movej(self.resting_pose_angles[self.robot_name])
+            
+            pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)
+            pyb.removeBody(self.robot)
+            if not self.tool:
+                self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_mrw510.urdf", useFixedBase=True, basePosition=[base_pos[0], base_pos[1], self.fixed_height[self.robot_name]], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
+            else:
+                self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_tand_gerad.urdf", useFixedBase=True, basePosition=[base_pos[0], base_pos[1], self.fixed_height[self.robot_name]], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
+            joints = [pyb.getJointInfo(self.robot, i) for i in range(pyb.getNumJoints(self.robot))]
+            self.joints = [j[0] for j in joints if j[2] == pyb.JOINT_REVOLUTE]
+            for i in range(len(self.joints)):
+                pyb.resetJointState(self.robot, self.joints[i], self.resting_pose_angles[self.robot_name][i])
+            pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
+
+            self.movej(currj)
+
+            return True
 
 
 
@@ -277,7 +276,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         while not self.is_static:
             pyb.stepSimulation()
 
-    def calc_reward(self):
+    def reward(self):
 
         # idea: this method gets information about current welding part and the weld seam from the agent that is acting in the environment
         # then calculate reward based on this and the environment state
@@ -290,11 +289,10 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         return True
 
     # methods taken almost 1:1 from ravens code, need to add proper attribution later TODO
-    def movej(self, targj, speed=0.05, timeout=0.5):
+    def movej(self, targj, speed=0.05, timeout=0.025):
         """
         Move UR5 to target joint configuration.
         """
-
         t0 = time.time()
         while (time.time() - t0) < timeout:
             currj = [pyb.getJointState(self.robot, i)[0] for i in self.joints]

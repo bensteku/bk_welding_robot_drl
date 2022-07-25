@@ -210,8 +210,10 @@ class AgentPybulletOracle(AgentPybulletDemonstration):
                 return None
         #print(self.plan)
         #input("wait a minute")
+        action, tool = self.plan.pop(0)
+        self.env.switch_tool(tool)
         
-        return self.plan.pop(0)
+        return action
 
     def _set_objective(self):
         # maybe safeguard against empty goals list here TODO
@@ -250,7 +252,7 @@ class AgentPybulletOracle(AgentPybulletDemonstration):
                     act["translate_base"] = base_position_todo[i]
                     act["translate"] = ee_pos_during_base_movement[i]
                     act["rotate"] = ee_rot_during_base_movement[i]
-                    self.plan.append(act)
+                    self.plan.append((act, objective["tool"]))
 
                 # 2. move ee to start position
                 # get linear interpolation to start position
@@ -269,7 +271,7 @@ class AgentPybulletOracle(AgentPybulletDemonstration):
                     act["translate_base"] = base_position_todo[i]
                     act["translate"] = ee_pos_todo[i]
                     act["rotate"] = ee_rot_todo[i]
-                    self.plan.append(act)
+                    self.plan.append((act, objective["tool"]))
 
                 # 3. move ee to end position
                 # get linear interpolation to end position
@@ -288,7 +290,7 @@ class AgentPybulletOracle(AgentPybulletDemonstration):
                     act["translate_base"] = base_position_todo[i]
                     act["translate"] = ee_pos_todo[i]
                     act["rotate"] = ee_rot_todo[i]
-                    self.plan.append(act)
+                    self.plan.append((act, objective["tool"]))
 
                 # 4. move ee upwards
                 # get linear interpolation to end position
@@ -298,14 +300,14 @@ class AgentPybulletOracle(AgentPybulletDemonstration):
                 if self.env._relative_movement:
                     # convert to relative movement if needed
                     ee_pos_todo = [(ee_pos_todo[i]-ee_pos_todo[i-1] if i>0 else ee_pos_todo[0]-ee_pos_at_welding_end) for i in range(len(ee_pos_todo))]
-                    ee_rot_todo = [np.array([0, 0, 0, 1]) for i in range(len(ee_rot_todo))]
+                    ee_rot_todo = [np.array([0, 0, 0, 0]) for i in range(len(ee_rot_todo))]
                     base_position_todo = [np.array([0, 0]) for i in range(len(ee_pos_todo))]
                 for i in range(len(base_position_todo)):
                     act = OrderedDict()
                     act["translate_base"] = base_position_todo[i]
                     act["translate"] = ee_pos_todo[i]
                     act["rotate"] = ee_rot_todo[i]
-                    self.plan.append(act)
+                    self.plan.append((act, objective["tool"]))
             
             
             return True

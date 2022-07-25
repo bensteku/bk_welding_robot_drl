@@ -19,6 +19,8 @@ a._set_goals(index)
 
 for i in range(500000):
 
+    if a.plan:
+        print(a.plan[0])
     act = a.act(e._get_obs())
     #print(e._get_obs())
     #print(act)
