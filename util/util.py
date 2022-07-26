@@ -131,3 +131,12 @@ def pos_interpolate(pos1, pos2, speed):
         cur = cur + missing_mul * delta
         res.append(cur)
         return res
+
+def quaternion_dot(quat1, quat2):
+    return quat1[0] * quat2[0] + quat1[1] * quat2[1] + quat1[2] * quat2[2] + quat1[3] * quat2[3]
+
+def quaternion_similarity(quat1, quat2):
+    return 1 - np.abs(quaternion_dot(quat1, quat2))
+
+def quaternion_apx_eq(quat1, quat2, thresh=5e-2):
+    return  quaternion_similarity(quat1, quat2) < thresh

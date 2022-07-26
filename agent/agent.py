@@ -5,6 +5,7 @@ import numpy as np
 from util import xml_parser, util
 from scipy.spatial.transform import Rotation
 from collections import OrderedDict
+from model import model
 import pybullet as pyb
 
 PYBULLET_SCALE_FACTOR = 0.0005
@@ -120,6 +121,36 @@ class AgentPybullet(Agent):
         """
 
         objs = self.goals.pop(0)
+
+    def reward(self, obs = None):
+        
+        reward = 0
+        if not self.welding:
+            # if the arm is in moving mode, give out rewards for moving towards the general region of the objective
+            # quadratic reward to create smooth gradient
+            distance = np.linalg.norm(self.objective["weldseams"] - obs["base_position"])
+            if distance < self.base_pos_reward_thresh:
+                reward += 10
+                self.welding = True  # end moving
+            else:
+                reward += (-10.0/(9*self.base_pos_reward_thresh**2)) * distance ** 2 + 10  # quadratic function: 10 at threshold, 0 at 3*threshold
+        else:
+            # if the arm is in welding mode, then give out a reward in concordance to how far away it is from the desired position and how closely
+            # it matches the ground truth rotation
+            # if the robot is in an invalid state (as determined by a timeout in the movement method) then give a negative reward
+            if self.timeout:
+                reward -= 10
+                self.timeout = False
+            else:
+                distance = np.linalg.norm(self.objective["weldseams"] - obs["position"]) 
+                if distance < self.ee_pos_reward_thresh:
+                    reward += 20
+                    self.objective = None  # objective achieved
+                else:
+                    reward += (-20.0/(9*self.ee_pos_reward_thresh**2)) * distance ** 2 + 20  # quadratic function: 20 at threshold, 0 at 3*threshold
+                reward = reward * (1 - util.quaternion_similarity(self.objective["target_rot"], obs["rotation"])**0.5)
+
+        return reward, None
         
 
 
