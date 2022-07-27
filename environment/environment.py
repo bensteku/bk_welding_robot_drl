@@ -2,7 +2,7 @@ import gym
 import pybullet as pyb
 import time
 import numpy as np
-from util.util import matrix_to_quaternion, quaternion_diff, rpy_to_quaternion, quaternion_to_rpy, quaternion_multiply, quaternion_invert
+from util.util import matrix_to_quaternion, quaternion_diff, quaternion_normalize, rpy_to_quaternion, quaternion_to_rpy, quaternion_multiply, quaternion_invert
 from collections import OrderedDict
 
 class WeldingEnvironment(gym.Env):
@@ -39,16 +39,16 @@ class WeldingEnvironment(gym.Env):
 
     def step(self, action=None):
 
-        if not self.agent:  # no agent has been set
-            raise ValueError("Agent needs to be created and set for this environment via set_agent()")
-
         timeout = self._perform_action(action)
-        if timeout:
-            return self._get_obs(), 0, False, None
-        reward, info = self.reward() if action is not None else (0, {})
+        
+        obs = self._get_obs()
+
+        reward, info = self.agent.reward(obs, timeout) if action is not None else (0, False)
+        if info:
+            self.agent.next_state()
         done = self.agent.is_done()
 
-        return self._get_obs(), reward, done, info
+        return obs, reward, done, info
 
     def close(self):
 
@@ -240,7 +240,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                 new_state["base_position"] = state["base_position"] + action["translate_base"]
                 new_state["position"] = state["position"] + action["translate"]
                 new_state["rotation"] = state["rotation"] + action["rotate"]
-                new_state["rotation"] = self._quat_w_to_ee(new_state["rotation"])
+                new_state["rotation"] = self._quat_w_to_ee(quaternion_normalize(new_state["rotation"]))
                 """
                 print("state")
                 print(state)
@@ -262,7 +262,6 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                 new_state["position"] = action["translate"]
                 new_state["rotation"] = self._quat_w_to_ee(action["rotate"])
                 if not self.observation_space.contains(new_state):
-                    print("problem")
                     return False  # if the new state is invalid, return false and do nothing
 
             # first move the base of the robot...(but only if the new location is sufficiently different from the old one)
@@ -276,18 +275,6 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         while not self.is_static:
             pyb.stepSimulation()
 
-    def reward(self):
-
-        # idea: this method gets information about current welding part and the weld seam from the agent that is acting in the environment
-        # then calculate reward based on this and the environment state
-
-        return 0.0, None
-
-    def is_done(self):
-
-        return False
-        return True
-
     # methods taken almost 1:1 from ravens code, need to add proper attribution later TODO
     def movej(self, targj, speed=0.05, timeout=0.025):
         """
@@ -298,7 +285,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             currj = [pyb.getJointState(self.robot, i)[0] for i in self.joints]
             currj = np.array(currj)
             diffj = targj - currj
-            if all(np.abs(diffj) < 1e-2):
+            if all(np.abs(diffj) < 1e-5):
                 return False
 
             # Move with constant velocity
@@ -475,9 +462,9 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
 
         # contains the position (as xyz) and rotation (as quaternion) of the end effector (i.e. the welding torch) in world frame
         min_position = np.array([-0.2, -0.2, 0.001])  # provisional
-        max_position = np.array([6., 6., 1])
-        min_position_base = np.array([-0.2, -0.2, 0.001]) 
-        max_position_base = np.array([6., 6., 1])
+        max_position = np.array([6., 6., 1.25])
+        min_position_base = np.array([-0.2, -0.2]) 
+        max_position_base = np.array([6., 6.])
         min_rotation = np.array([-1, -1, -1, -1])
         max_rotation = min_rotation * (-1)
         self.pos_speed = 0.01  # provisional
@@ -486,7 +473,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         self.observation_space = gym.spaces.Dict(
             {
                 'position': gym.spaces.Box(low=min_position, high=max_position, shape=(3,), dtype=np.float32),
-                'base_position': gym.spaces.Box(low=min_position[:2], high=max_position[:2], shape=(2,), dtype=np.float32),
+                'base_position': gym.spaces.Box(low=min_position_base, high=max_position_base, shape=(2,), dtype=np.float32),
                 'rotation': gym.spaces.Box(low=min_rotation, high=max_rotation, shape=(4,), dtype=np.float32)
             }
         )
@@ -497,7 +484,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         if self._relative_movement:
             min_position = np.array([-self.pos_speed, -self.pos_speed, -self.pos_speed])  
             max_position = min_position * -1
-            min_position_base = np.array([-self.base_speed, -self.base_speed, -self.base_speed]) 
+            min_position_base = np.array([-self.base_speed, -self.base_speed]) 
             max_position_base = min_position_base * -1
             min_rotation = np.array([-0.001, -0.001, -0.001, -0.001])
             max_rotation = np.array([0.001, 0.001, 0.001, 0.001])
@@ -505,7 +492,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         self.action_space = gym.spaces.Dict(
             {
                 'translate': gym.spaces.Box(low=min_position, high=max_position, shape=(3,), dtype=np.float32),
-                'translate_base': gym.spaces.Box(low=min_position_base[:2], high=max_position_base[:2], shape=(2,), dtype=np.float32),
+                'translate_base': gym.spaces.Box(low=min_position_base, high=max_position_base, shape=(2,), dtype=np.float32),
                 'rotate': gym.spaces.Box(low=min_rotation, high=max_rotation, shape=(4,), dtype=np.float32)
             }
         )

@@ -18,8 +18,8 @@ class Agent:
         self.asset_files_path = asset_files_path
         self.dataset = self._register_data()
 
-        # state variable, 0: pathing, 1: welding
-        self.welding = 0  
+        # state variable, 0: base pathing, 1: moving ee down to weld seam, 2: welding, 3: moving ee back up
+        self.welding_state = 0  
 
         # goals: overall collection of weldseams that are left to be dealt with
         # objective: the weldseam that is currently being dealt with
@@ -30,6 +30,12 @@ class Agent:
 
         # welding environment as defined in the other file, needs to be set after construction due to mutual dependence
         self.env = None
+
+    def next_state(self):
+        if self.welding_state == 1 or self.welding_state == 3:
+            self.objective = None
+        self.welding_state = self.welding_state + 1 if self.welding_state < 3 else 0
+        return self.welding_state
 
     def _set_env(self, senv: env.WeldingEnvironment):
         """
@@ -62,6 +68,9 @@ class AgentPybullet(Agent):
         
         super().__init__(asset_files_path)
         self.xyz_offset = np.array((0, 0, 0.01))  # offset in pybullet coordinates, location to place the objects into
+        self.base_pos_reward_thresh = 0.5
+        self.ee_pos_reward_thresh = 5e-2  # really TODO
+        self.quat_sim_thresh = 1e-4  # this probably too
 
     def load_object_into_env(self, index):
 
@@ -69,8 +78,9 @@ class AgentPybullet(Agent):
             raise ValueError("env needs to be set before agent can act upon it!")
 
         self.env.add_object(os.path.join(self.asset_files_path, self.dataset["filenames"][index]), 
-        pose = (self.xyz_offset, [0, 0, 0, 1]),
-        category = "fixed" )
+                                        pose = (self.xyz_offset, [0, 0, 0, 1]),
+                                        category = "fixed" )
+        self._set_goals(index)
 
     def _register_data(self):
         """
@@ -94,6 +104,7 @@ class AgentPybullet(Agent):
     def _set_goals(self, index):
         """
         Uses the dataset to load in the weldseams of the file indicated by index into the goals list.
+        One element in goal array <=> one weldseam in the original xml
 
         Args:
             index: int, signifies index in the dataset array
@@ -115,44 +126,94 @@ class AgentPybullet(Agent):
         else:
             return True
 
+    def _set_plan(self):
+        if self.goals:
+            self.plan = []
+            goal = self.goals.pop(0)
+            for idx in range(len(goal["weldseams"])):
+                tpl = (goal["weldseams"][idx], goal["norm"][idx], goal["target_rot"][idx], goal["tool"])
+                self.plan.append(tpl)
+            return True
+        else:
+            return False
+
     def _set_objective(self):
         """
         Method for translating elements of goal array into concrete instructions for actions
         """
+        if self.plan:
+            self.objective = self.plan.pop(0)
+            return True
+        else:
+            return False
 
-        objs = self.goals.pop(0)
-
-    def reward(self, obs = None):
+    def reward(self, obs=None, timeout=False):
         
+        # TODO: implement collision check
+        pos_done, rot_done, base_done = False, False, False
         reward = 0
-        if not self.welding:
+        if self.welding_state == 0:
             # if the arm is in moving mode, give out rewards for moving towards the general region of the objective
             # quadratic reward to create smooth gradient
-            distance = np.linalg.norm(self.objective["weldseams"] - obs["base_position"])
+            distance = np.linalg.norm(self.objective[0][:2] - obs["base_position"])
+            
             if distance < self.base_pos_reward_thresh:
                 reward += 10
-                self.welding = True  # end moving
+                base_done = True
             else:
                 reward += (-10.0/(9*self.base_pos_reward_thresh**2)) * distance ** 2 + 10  # quadratic function: 10 at threshold, 0 at 3*threshold
+        elif self.welding_state == 3:
+            # move upwards
+            distance = np.linalg.norm(np.array([obs["position"][0], obs["position"], 0.5]) - obs["position"]) 
+            reward += (-10.0/(9*self.base_pos_reward_thresh**2)) * distance ** 2 + 10
         else:
-            # if the arm is in welding mode, then give out a reward in concordance to how far away it is from the desired position and how closely
+            # if the arm is in welding mode give out a reward in concordance to how far away it is from the desired position and how closely
             # it matches the ground truth rotation
-            # if the robot is in an invalid state (as determined by a timeout in the movement method) then give a negative reward
-            if self.timeout:
-                reward -= 10
-                self.timeout = False
+            # if the robot is in an invalid state (as determined by a timeout in the movement method) give a negative reward
+            distance = np.linalg.norm(self.objective[0] - obs["position"]) 
+            
+            if distance < self.ee_pos_reward_thresh:
+                reward += 20
+                pos_done = True  # objective achieved
             else:
-                distance = np.linalg.norm(self.objective["weldseams"] - obs["position"]) 
-                if distance < self.ee_pos_reward_thresh:
-                    reward += 20
-                    self.objective = None  # objective achieved
-                else:
-                    reward += (-20.0/(9*self.ee_pos_reward_thresh**2)) * distance ** 2 + 20  # quadratic function: 20 at threshold, 0 at 3*threshold
-                reward = reward * (1 - util.quaternion_similarity(self.objective["target_rot"], obs["rotation"])**0.5)
+                reward += (-20.0/(9*self.ee_pos_reward_thresh**2)) * distance ** 2 + 20  # quadratic function: 20 at threshold, 0 at 3*threshold
+            
+            quat_sim = util.quaternion_similarity(self.objective[2], obs["rotation"])    
+            if quat_sim < self.quat_sim_thresh:
+                rot_done = True
+            
+            reward = reward * (1 - quat_sim**0.5)
+        if timeout:
+            reward -= 75
 
-        return reward, None
+        if pos_done and rot_done:
+            self.objective = None
+
+        return reward, pos_done and rot_done or base_done
         
+class AgentPybulletNN(AgentPybullet):
+    
+    def __init__(self, asset_files_path):
+        super.__init__(asset_files_path)
 
+    def act(self, obs=None):
+
+        if not obs:
+            return None
+        
+        if not self.plan and not self.objective:  # only create new plan if there's also no current objective
+            self._set_plan()
+        if not self.objective:
+            self._set_objective()
+
+        action = None
+
+        ## call neural net for action TODO
+        # .............................
+        # .............................
+        ## action determined
+
+        return action
 
 class AgentPybulletDemonstration(AgentPybullet):
     """
@@ -231,30 +292,84 @@ class AgentPybulletOracle(AgentPybulletDemonstration):
         if not obs:
             return None
 
-        # nomenclature:
-        # goals: overall collection of weldseams that are left to be dealt with
-        # objective: the weldseam that is currently being dealt with
-        # plan: concrete collection of robot commands to achieve (a part of) the objective
+        if not self.plan and not self.objective:  # only create new plan if there's also no current objective
+            self._set_plan()
+        if not self.objective:
+            self._set_objective()
 
-        if not self.plan:
-            if not self._set_plan(obs):
-                return None
-        #print(self.plan)
-        #input("wait a minute")
-        action, tool = self.plan.pop(0)
-        self.env.switch_tool(tool)
-        
+        action = OrderedDict()
+
+        if self.welding_state == 0:
+            # state: moving base
+            base_position_apx = np.average(np.array([self.objective[0][:2], self.plan[0][0][:2]]), axis=0)[:2] + np.array([0.25, -0.25])
+            dist_vec = base_position_apx - obs["base_position"]
+            dist = np.linalg.norm(dist_vec)
+            if dist > self.env.base_speed:
+                dist_vec = dist_vec/dist
+                dist_vec = dist_vec * self.env.base_speed
+
+            if self.env._relative_movement:
+                action["translate_base"] = dist_vec
+                action["translate"] = np.array([dist_vec[0], dist_vec[1], 0])
+                action["rotate"] = np.array([0, 0, 0, 0])
+            else:
+                action["translate_base"] = obs["base_position"] + dist_vec
+                action["translate"] = obs["position"] + np.array([dist_vec[0], dist_vec[1], 0])
+                action["rotate"] = obs["rotation"]
+        elif self.welding_state == 1:
+            # state: moving ee to weldseam start
+            dist_vec = self.objective[0] - obs["position"]
+            dist = np.linalg.norm(dist_vec)
+            if dist > self.env.pos_speed:
+                dist_vec = dist_vec/dist
+                dist_vec = dist_vec * self.env.pos_speed
+            n = int(dist/self.env.pos_speed)
+            quat_trajectory = util.quaternion_interpolate(obs["rotation"], self.objective[2], n)
+
+            if self.env._relative_movement:
+                action["translate_base"] = np.array([0, 0])
+                action["translate"] = dist_vec
+                action["rotate"] = quat_trajectory[1]-quat_trajectory[0]  # TODO
+            else:
+                action["translate_base"] = obs["base_position"]
+                action["translate"] = obs["position"] + dist_vec
+                action["rotate"] = quat_trajectory[1]
+
+        elif self.welding_state == 2:
+            # state: moving ee along weldseam
+            dist_vec = self.objective[0] - obs["position"]
+            dist = np.linalg.norm(dist_vec)
+            if dist > self.env.pos_speed/5:
+                dist_vec = dist_vec/dist
+                dist_vec = dist_vec * self.env.pos_speed/5
+            n = int(dist/(self.env.pos_speed/5))
+            quat_trajectory = util.quaternion_interpolate(obs["rotation"], self.objective[2], n)
+
+            if self.env._relative_movement:
+                action["translate_base"] = np.array([0, 0])
+                action["translate"] = dist_vec
+                action["rotate"] = quat_trajectory[1]-quat_trajectory[0]  # TODO
+            else:
+                action["translate_base"] = obs["base_position"]
+                action["translate"] = obs["position"] + dist_vec
+                action["rotate"] = quat_trajectory[1]
+        elif self.welding_state == 3:
+            # state: moving ee back up so the base can move
+            pass
+        """
+        print("action")
+        print(action)
+        print("observation")
+        print(obs)
+        print("objective")
+        print(self.objective)
+        print("state")
+        print(self.welding_state)
+        """
+
         return action
 
-    def _set_objective(self):
-        # maybe safeguard against empty goals list here TODO
-        if self.goals:
-            self.objective = self.goals.pop(0)
-            return True
-        else:
-            return False
-
-    def _set_plan(self, obs):
+    def _set_plano(self, obs):
         if not self.goals:
             return False
         else:
