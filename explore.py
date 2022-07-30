@@ -6,7 +6,7 @@ from scipy.spatial.transform import Rotation
 from util.util import quaternion_to_rpy
 
 a = AgentPybulletOracle("./assets/objects/")
-e = WeldingEnvironmentPybullet(a, "./assets/", True, robot="kr16", relative_movement=False)
+e = WeldingEnvironmentPybullet(a, "./assets/", True, robot="kr16", relative_movement=True)
 
 
 index = a.dataset["filenames"].index("201910204483_R1.urdf")

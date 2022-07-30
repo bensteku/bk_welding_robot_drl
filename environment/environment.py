@@ -225,7 +225,11 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
 
             return True
 
-
+    def is_in_collision(self, obj_id):
+        """
+        Returns whether there is a collision anywhere between the robot and the specified object
+        """
+        return True if pyb.getContactPoints(self.robot, obj_id) else False
 
 
     def _perform_action(self, action):
@@ -239,8 +243,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                 # if somehow the order of dict entries in the observation space OrderedDict changes, then the order of the next lines defining the entries of the new state needs to be switched as well
                 new_state["base_position"] = state["base_position"] + action["translate_base"]
                 new_state["position"] = state["position"] + action["translate"]
-                new_state["rotation"] = state["rotation"] + action["rotate"]
-                new_state["rotation"] = self._quat_w_to_ee(quaternion_normalize(new_state["rotation"]))
+                new_state["rotation"] = self._quat_w_to_ee(action["rotate"])
                 """
                 print("state")
                 print(state)
@@ -264,7 +267,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                 if not self.observation_space.contains(new_state):
                     return False  # if the new state is invalid, return false and do nothing
 
-            # first move the base of the robot...(but only if the new location is sufficiently different from the old one)
+            # first move the base of the robot...(but only if the new location is sufficiently different from the old one to prevent constant)
             if np.linalg.norm(new_state["base_position"]-state["base_position"]) > 1e-4:
                 pyb.resetBasePositionAndOrientation(self.robot, np.append(new_state["base_position"], self.fixed_height[self.robot_name]), pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
             # ...then the joints
@@ -285,7 +288,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             currj = [pyb.getJointState(self.robot, i)[0] for i in self.joints]
             currj = np.array(currj)
             diffj = targj - currj
-            if all(np.abs(diffj) < 1e-5):
+            if all(np.abs(diffj) < 1e-2):
                 return False
 
             # Move with constant velocity
@@ -444,7 +447,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
 
         self.fixed_height = {
             "ur5": 2, #tbd
-            "kr16": 1.8,
+            "kr16": 2,
             "kr6": 2 #tbd
         }
 

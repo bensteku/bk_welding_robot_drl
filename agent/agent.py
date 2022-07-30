@@ -71,15 +71,16 @@ class AgentPybullet(Agent):
         self.base_pos_reward_thresh = 0.5
         self.ee_pos_reward_thresh = 5e-2  # really TODO
         self.quat_sim_thresh = 1e-4  # this probably too
+        self.current_part_id = None
 
     def load_object_into_env(self, index):
 
         if self.env is None:
             raise ValueError("env needs to be set before agent can act upon it!")
 
-        self.env.add_object(os.path.join(self.asset_files_path, self.dataset["filenames"][index]), 
-                                        pose = (self.xyz_offset, [0, 0, 0, 1]),
-                                        category = "fixed" )
+        self.current_pard_id = self.env.add_object(os.path.join(self.asset_files_path, self.dataset["filenames"][index]), 
+                                                    pose = (self.xyz_offset, [0, 0, 0, 1]),
+                                                    category = "fixed" )
         self._set_goals(index)
 
     def _register_data(self):
@@ -185,6 +186,8 @@ class AgentPybullet(Agent):
             reward = reward * (1 - quat_sim**0.5)
         if timeout:
             reward -= 75
+        if self.env.is_in_collision(self.current_pard_id):
+            reward -= 150
 
         if pos_done and rot_done:
             self.objective = None
@@ -206,6 +209,8 @@ class AgentPybulletNN(AgentPybullet):
         if not self.objective:
             self._set_objective()
 
+        tool = self.objective[3]
+        self.env.switch_tool(tool)
         action = None
 
         ## call neural net for action TODO
@@ -311,7 +316,7 @@ class AgentPybulletOracle(AgentPybulletDemonstration):
             if self.env._relative_movement:
                 action["translate_base"] = dist_vec
                 action["translate"] = np.array([dist_vec[0], dist_vec[1], 0])
-                action["rotate"] = np.array([0, 0, 0, 0])
+                action["rotate"] = obs["rotation"]
             else:
                 action["translate_base"] = obs["base_position"] + dist_vec
                 action["translate"] = obs["position"] + np.array([dist_vec[0], dist_vec[1], 0])
@@ -329,7 +334,7 @@ class AgentPybulletOracle(AgentPybulletDemonstration):
             if self.env._relative_movement:
                 action["translate_base"] = np.array([0, 0])
                 action["translate"] = dist_vec
-                action["rotate"] = quat_trajectory[1]-quat_trajectory[0]  # TODO
+                action["rotate"] = quat_trajectory[1]
             else:
                 action["translate_base"] = obs["base_position"]
                 action["translate"] = obs["position"] + dist_vec
@@ -348,7 +353,7 @@ class AgentPybulletOracle(AgentPybulletDemonstration):
             if self.env._relative_movement:
                 action["translate_base"] = np.array([0, 0])
                 action["translate"] = dist_vec
-                action["rotate"] = quat_trajectory[1]-quat_trajectory[0]  # TODO
+                action["rotate"] = quat_trajectory[1]
             else:
                 action["translate_base"] = obs["base_position"]
                 action["translate"] = obs["position"] + dist_vec
