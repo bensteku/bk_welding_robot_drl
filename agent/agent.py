@@ -166,7 +166,8 @@ class AgentPybullet(Agent):
         elif self.welding_state == 3:
             # move upwards
             distance = np.linalg.norm(np.array([obs["position"][0], obs["position"], 0.5]) - obs["position"]) 
-            reward += (-10.0/(9*self.base_pos_reward_thresh**2)) * distance ** 2 + 10
+            #reward += (-10.0/(9*self.base_pos_reward_thresh**2)) * distance ** 2 + 10
+            reward += util.exp_decay(distance, 20, 3*distance)
         else:
             # if the arm is in welding mode give out a reward in concordance to how far away it is from the desired position and how closely
             # it matches the ground truth rotation
@@ -177,7 +178,8 @@ class AgentPybullet(Agent):
                 reward += 20
                 pos_done = True  # objective achieved
             else:
-                reward += (-20.0/(9*self.ee_pos_reward_thresh**2)) * distance ** 2 + 20  # quadratic function: 20 at threshold, 0 at 3*threshold
+                #reward += (-20.0/(9*self.ee_pos_reward_thresh**2)) * distance ** 2 + 20  # quadratic function: 20 at threshold, 0 at 3*threshold
+                reward += util.exp_decay(distance, 20, 3*distance)
             
             quat_sim = util.quaternion_similarity(self.objective[2], obs["rotation"])    
             if quat_sim < self.quat_sim_thresh:

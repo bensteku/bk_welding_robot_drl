@@ -140,3 +140,10 @@ def quaternion_similarity(quat1, quat2):
 
 def quaternion_apx_eq(quat1, quat2, thresh=5e-2):
     return  quaternion_similarity(quat1, quat2) < thresh
+
+def exp_decay(x, max, zero_crossing):
+    if x >= zero_crossing:
+        return 0
+    half = max/2.0
+    three_halfs = max * 1.5
+    return three_halfs * np.exp((np.log(1./3.)/(zero_crossing))*x) - half
