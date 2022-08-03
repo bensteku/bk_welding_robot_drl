@@ -7,6 +7,7 @@ from scipy.spatial.transform import Rotation
 from collections import OrderedDict
 from model import model
 import pybullet as pyb
+from model.model import AgentModelSimpleDiscrete
 
 PYBULLET_SCALE_FACTOR = 0.0005
 
@@ -82,6 +83,18 @@ class AgentPybullet(Agent):
                                                     pose = (self.xyz_offset, [0, 0, 0, 1]),
                                                     category = "fixed" )
         self._set_goals(index)
+
+    def get_state(self):
+        """
+        Returns the state of the agent.
+        This consists of an observation of the environment and the agent's current objective.
+        """
+        obs = self.env._get_obs()
+        if self.objective:
+            state = np.hstack((obs["base_position"], obs["position"], obs["rotation"], self.objective[0], self.objective[1][0], self.objective[1][1]))
+        else:
+            state = np.hstack((obs["base_position"], obs["position"], obs["rotation"], [0, 0, 0], [1, 0, 0], [1, 0, 0]))
+        return state
 
     def _register_data(self):
         """
@@ -199,7 +212,8 @@ class AgentPybullet(Agent):
 class AgentPybulletNN(AgentPybullet):
     
     def __init__(self, asset_files_path):
-        super.__init__(asset_files_path)
+        super().__init__(asset_files_path)
+        self.model = AgentModelSimpleDiscrete()
 
     def act(self, obs=None):
 
@@ -216,8 +230,8 @@ class AgentPybulletNN(AgentPybullet):
         action = None
 
         ## call neural net for action TODO
-        # .............................
-        # .............................
+        action = self.model.select_action(obs, self.objective[0], self.objective[1])
+        action["rotate"] = np.array([0, 0, 0, 1])
         ## action determined
 
         return action

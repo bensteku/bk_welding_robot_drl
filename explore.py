@@ -1,11 +1,11 @@
-from multiprocessing.dummy import active_children
 from environment.environment import WeldingEnvironmentPybullet
-from agent.agent import AgentPybulletDemonstration, AgentPybulletOracle
+from agent.agent import AgentPybulletDemonstration, AgentPybulletNN, AgentPybulletOracle
 from time import sleep
 from scipy.spatial.transform import Rotation
 from util.util import quaternion_to_rpy
 
-a = AgentPybulletOracle("./assets/objects/")
+#a = AgentPybulletOracle("./assets/objects/")
+a = AgentPybulletNN("./assets/objects/")
 e = WeldingEnvironmentPybullet(a, "./assets/", True, robot="kr16", relative_movement=True)
 
 
@@ -22,6 +22,6 @@ while not done:
     obs, reward, done, info = e.step(act)
     print("reward")
     print(reward)
-    sleep(0.075)
+    #sleep(0.075)
 
 e.close()

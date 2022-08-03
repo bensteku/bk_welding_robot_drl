@@ -175,7 +175,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             'position': np.array(tmp[0]),
             'base_position':np.array(tmp2[4][:2]),  # only xy position of baselink
             'rotation': self._quat_ee_to_w(np.array(tmp[1]))  # the quaternion given by getLinkState is in ee frame, we transform it to world frame (because our target rotations are in world frame)
-        }       
+        }  
 
     def close(self):
 
@@ -243,7 +243,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                 # if somehow the order of dict entries in the observation space OrderedDict changes, then the order of the next lines defining the entries of the new state needs to be switched as well
                 new_state["base_position"] = state["base_position"] + action["translate_base"]
                 new_state["position"] = state["position"] + action["translate"]
-                new_state["rotation"] = self._quat_w_to_ee(action["rotate"])
+                new_state["rotation"] = self._quat_w_to_ee(quaternion_multiply(state["rotation"], action["rotate"]))
                 """
                 print("state")
                 print(state)
@@ -256,8 +256,8 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                 print("beispiel")
                 print(self.observation_space.sample())
                 """              
-                if not self.observation_space.contains(new_state):
-                    return False  # if the current state+action results in invalid state, return false and do nothing
+                #if not self.observation_space.contains(new_state):
+                #    return False  # if the current state+action results in invalid state, return false and do nothing
                 
             # ....otherwise use it as is
             else:
