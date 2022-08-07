@@ -1,14 +1,18 @@
 import torch
 import torch.nn as nn
+import torch.functional as F
 import numpy as np
 from torch.distributions.categorical import Categorical
-from model.net import SimpleNeuralNet
+from model.net import SimpleNeuralNet, ActorNet, CriticNet
 from collections import OrderedDict, namedtuple, deque
 from util.util import quaternion_multiply
 import random
 
 # wrapper class for Pytorch model of the agent
 # inspired by the architecture of MeshCNN
+
+torch.set_default_dtype(torch.double)
+#torch.autograd.set_detect_anomaly(True)
 
 class AgentModel:
 
@@ -38,19 +42,23 @@ class AgentModel:
         self.backward(out)
         self.optimizer.step()
 
-class AgentModelSimpleDiscrete(AgentModel):
+class AgentModelSimple(AgentModel):
 
     def __init__(self):
         
         super().__init__()
-        size = [18,32,32,16]
-        self.net = SimpleNeuralNet(size)
-        self.target_net = SimpleNeuralNet(size)
-        self.net = self.net.to(self.device).double()
-        self.target_net = self.target_net.to(self.device).double()
-        self.target_net.load_state_dict(self.net.state_dict())
-        self.optimizer = torch.optim.RMSprop(self.net.parameters())
-        self.criterion = nn.SmoothL1Loss()
+
+        self.action_scale_factor = 0.001
+
+        sizes = [126, 126]
+        self.actor = ActorNet(18,9, sizes).to(self.device)
+        self.critic = CriticNet(18 + 9, sizes).to(self.device)
+
+        self.t_actor = ActorNet(18,9, sizes).to(self.device)
+        self.t_critic = CriticNet(18 + 9, sizes).to(self.device)
+
+        self.optimizations = 0
+        self.training = True
 
         # incremental rotations around the axes by 1 degree
         self.discrete_rotations = [
@@ -68,113 +76,114 @@ class AgentModelSimpleDiscrete(AgentModel):
             ]
         ]
 
-    def forward(self, ee_pos, ee_rot, base_pos, target, normals):
-        
-        stack = np.hstack((base_pos, ee_pos, ee_rot, target, normals[0], normals[1]))
-        input_tensor = torch.from_numpy(stack).double()
-        input_tensor = input_tensor.to(self.device).requires_grad_()
-        return self.net(input_tensor)
+    def choose_action(self, state):
+        self.actor.eval()
+        input_tensor = state.to(self.device)
 
-    def select_action(self, obs, target, normals):
-        
-        pos = obs["position"]
-        rot = obs["rotation"]
-        base_pos = obs["base_position"]
-        random = np.random.random()
-        eps_thresh = 0  # TODO
-        if eps_thresh < random:
-            with torch.no_grad():
-                q_values = self.forward(pos, rot, base_pos, target, normals) 
-                best_indices = q_values.max(-1)[1].view(-1,1)  # [0] is the max values themselves, [1] their indices
-                best_indices = best_indices.cpu().detach().numpy()
+        mu, sigma = self.actor(input_tensor.double())
 
-                action = OrderedDict()
-                translate = [0, 0, 0]
-                translate_base = [0, 0]
-                quats = []
-                for i in range(3):
-                    if best_indices[i] == 0:
-                        translate[i] += -0.005
-                    elif best_indices[i] == 2:
-                        translate[i] += 0.005
-                for i in range(2):
-                    if best_indices[i+3] == 0:
-                        translate_base[i] += -0.005
-                    elif best_indices[i+3] == 2:
-                        translate_base[i] += 0.005
-                for i in range(3):
-                    if best_indices[i+5] == 0:
-                        quats.append(self.discrete_rotations[i][0])
-                    elif best_indices[i+5] == 1:
-                        quats.append(np.array([0, 0, 0, 1]))
-                    else:
-                        quats.append(self.discrete_rotations[i][1])
-                rotate = np.array([0, 0, 0, 1])
-                for quat in quats:
-                    rotate = quaternion_multiply(rotate, quat)
+        return self._actor_transform_output(mu, sigma)
 
-                action["translate_base"] = np.array(translate_base)
-                action["translate"] = np.array(translate)
-                action["rotate"] = rotate
+    def optimize(self, batch_size, memory, gamma):
 
-                return action
-        else:
-            pass  # TODO
-
-    def optimize(self, batch_size, memory):
         if len(memory) < batch_size:
             return
-        transitions = memory.sample(batch_size)
-        batch = Transition(*zip(*transitions))
+        
+        states, actions, rewards, new_states = memory.sample(batch_size)
 
-        non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
-                                          batch.next_state)), device=self.device, dtype=torch.bool)
+        states = torch.tensor(states).to(self.device)
+        rewards = torch.tensor(rewards).to(self.device)
+        actions = torch.tensor(actions).to(self.device)
+        new_states = torch.tensor(new_states).to(self.device)
 
-        non_final_next_states = torch.vstack([s for s in batch.next_state
-                                                if s is not None])
+        mu, sigma = self.t_actor(new_states)
+        target_actions = self._actor_transform_output(mu, sigma)
+        target_q_values = self.t_critic(new_states, target_actions)
+        q_values = self.critic(states, actions)
 
-        state_batch = torch.vstack(batch.state)
-        state_batch = torch.reshape(state_batch, (128,-1))
-        action_batch = torch.vstack(batch.action)
-        action_batch = torch.reshape(action_batch, (128,8,1))
-        reward_batch = torch.vstack(batch.reward)
+        target = rewards + gamma * target_q_values
 
-        state_action_values = self.net(state_batch).reshape((128,-1,1))
-        state_action_values = state_action_values.gather(1, action_batch)
+        #print(target_actions)
+        #print(target_q_values)
+        #print(q_values)
+        #print(target)
 
-        next_state_values = torch.zeros((batch_size, 8), device=self.device, dtype=torch.double)
-        target_values = self.target_net(non_final_next_states)
-        next_state_values[non_final_mask,:] = torch.reshape(target_values, (128,8,3)).max(-1)[0].detach()
+        self.critic.train()
+        self.critic.optimizer.zero_grad()
+        critic_loss = nn.functional.mse_loss(target, q_values)
+        critic_loss.backward()
+        self.critic.optimizer.step()
 
-        print(next_state_values.shape)
-        print(reward_batch.shape)
-        expected_state_action_values = (next_state_values * 0.999) + reward_batch
-        #print(expected_state_action_values)
+        self.critic.eval()
+        self.actor.optimizer.zero_grad()
+        mu, sigma = self.actor.forward(states)
+        actions = self._actor_transform_output(mu, sigma)
+        self.actor.train()
+        actor_loss = -self.critic.forward(states, actions)
+        actor_loss = torch.mean(actor_loss)
+        actor_loss.backward()
+        self.actor.optimizer.step()
 
-        loss = self.criterion(state_action_values, expected_state_action_values.unsqueeze(1))
+        self.soft_update()
 
-        self.optimizer.zero_grad()
-        loss.backward()
-        for param in self.net.parameters():
-            param.grad.data.clamp_(-1, 1)
-        self.optimizer.step()
+    def _actor_transform_output(self, mu, sigma):
+        draw = torch.normal(mu, sigma)
 
-# code taken from PyTorch's DRL tutorial
-Transition = namedtuple('Transition',
-                        ('state', 'action', 'next_state', 'reward'))
+        draw[-4:] = draw[-4:].clone() / torch.norm(draw[-4:].clone())  # create unit quaternion
+        draw[:-4] = draw[:-4].clone() * self.action_scale_factor  # scale the translation by the scale factor
 
+        return draw
+
+    def soft_update(self, tau = 0.001):
+        actor_params = self.actor.named_parameters()
+        critic_params = self.critic.named_parameters()
+        t_actor_params = self.t_actor.named_parameters()
+        t_critic_params = self.t_critic.named_parameters()
+
+        critic_state_dict = dict(critic_params)
+        actor_state_dict = dict(actor_params)
+        t_critic_dict = dict(t_critic_params)
+        t_actor_dict = dict(t_actor_params)
+
+        for name in critic_state_dict:
+            critic_state_dict[name] = tau*critic_state_dict[name].clone() + (1-tau)*t_critic_dict[name].clone()
+
+        self.t_critic.load_state_dict(critic_state_dict)
+
+        for name in actor_state_dict:
+            actor_state_dict[name] = tau*actor_state_dict[name].clone() + (1-tau)*t_actor_dict[name].clone()
+        self.t_actor.load_state_dict(actor_state_dict)
 
 class ReplayMemory(object):
 
     def __init__(self, capacity):
-        self.memory = deque([],maxlen=capacity)
+        self.states = np.zeros((capacity, 18))
+        self.new_states = np.zeros((capacity, 18))
+        self.actions = np.zeros((capacity, 9))
+        self.rewards = np.zeros((capacity, 1))
 
-    def push(self, *args):
+        self.idx = 0
+        self.capacity = capacity
+
+    def push(self, state_old, action, state_new, reward):
         """Save a transition"""
-        self.memory.append(Transition(*args))
+        idx = self.idx % self.capacity
+        self.states[idx] = state_old
+        self.new_states[idx] = state_new
+        self.actions[idx] = action
+        self.rewards[idx] = reward
+        self.idx += 1
+
 
     def sample(self, batch_size):
-        return random.sample(self.memory, batch_size)
+        max_mem = min(self.idx, self.capacity)   
+        batch = np.random.choice(max_mem, batch_size)
+        states = self.states[batch]        
+        new_states = self.new_states[batch] 
+        actions = self.actions[batch]
+        rewards = self.rewards[batch]
+
+        return states, actions, rewards, new_states
 
     def __len__(self):
-        return len(self.memory)
+        return len(self.states)

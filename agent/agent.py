@@ -7,7 +7,7 @@ from scipy.spatial.transform import Rotation
 from collections import OrderedDict
 from model import model
 import pybullet as pyb
-from model.model import AgentModelSimpleDiscrete
+from model.model import AgentModelSimple
 
 PYBULLET_SCALE_FACTOR = 0.0005
 
@@ -20,7 +20,7 @@ class Agent:
         self.dataset = self._register_data()
 
         # state variable, 0: base pathing, 1: moving ee down to weld seam, 2: welding, 3: moving ee back up
-        self.welding_state = 0  
+        self.state = 0  
 
         # goals: overall collection of weldseams that are left to be dealt with
         # objective: the weldseam that is currently being dealt with
@@ -33,10 +33,10 @@ class Agent:
         self.env = None
 
     def next_state(self):
-        if self.welding_state == 1 or self.welding_state == 3:
+        if self.state == 1 or self.state == 3:
             self.objective = None
-        self.welding_state = self.welding_state + 1 if self.welding_state < 3 else 0
-        return self.welding_state
+        self.state = self.state + 1 if self.state < 3 else 0
+        return self.state
 
     def _set_env(self, senv: env.WeldingEnvironment):
         """
@@ -166,7 +166,7 @@ class AgentPybullet(Agent):
         # TODO: implement collision check
         pos_done, rot_done, base_done = False, False, False
         reward = 0
-        if self.welding_state == 0:
+        if self.state == 0:
             # if the arm is in moving mode, give out rewards for moving towards the general region of the objective
             # quadratic reward to create smooth gradient
             distance = np.linalg.norm(self.objective[0][:2] - obs["base_position"])
@@ -176,7 +176,7 @@ class AgentPybullet(Agent):
                 base_done = True
             else:
                 reward += (-10.0/(9*self.base_pos_reward_thresh**2)) * distance ** 2 + 10  # quadratic function: 10 at threshold, 0 at 3*threshold
-        elif self.welding_state == 3:
+        elif self.state == 3:
             # move upwards
             distance = np.linalg.norm(np.array([obs["position"][0], obs["position"], 0.5]) - obs["position"]) 
             #reward += (-10.0/(9*self.base_pos_reward_thresh**2)) * distance ** 2 + 10
@@ -195,10 +195,10 @@ class AgentPybullet(Agent):
                 reward += util.exp_decay(distance, 20, 3*distance)
             
             quat_sim = util.quaternion_similarity(self.objective[2], obs["rotation"])    
-            if quat_sim < self.quat_sim_thresh:
+            if quat_sim < 1-self.quat_sim_thresh:
                 rot_done = True
             
-            reward = reward * (1 - quat_sim**0.5)
+            reward = reward * (quat_sim**0.5)
         if timeout:
             reward -= 75
         if self.env.is_in_collision(self.current_pard_id):
@@ -213,12 +213,9 @@ class AgentPybulletNN(AgentPybullet):
     
     def __init__(self, asset_files_path):
         super().__init__(asset_files_path)
-        self.model = AgentModelSimpleDiscrete()
+        self.model = AgentModelSimple()
 
-    def act(self, obs=None):
-
-        if not obs:
-            return None
+    def act(self, state):
         
         if not self.plan and not self.objective:  # only create new plan if there's also no current objective
             self._set_plan()
@@ -227,12 +224,18 @@ class AgentPybulletNN(AgentPybullet):
 
         tool = self.objective[3]
         self.env.switch_tool(tool)
-        action = None
 
         ## call neural net for action TODO
-        action = self.model.select_action(obs, self.objective[0], self.objective[1])
-        action["rotate"] = np.array([0, 0, 0, 1])
-        ## action determined
+        action_tensor = self.model.choose_action(state)
+        action_array = action_tensor.cpu().detach().numpy()
+        action = OrderedDict()
+        action["translate_base"] = action_array[:2]
+        action["translate"] = action_array[2:5]
+        action["rotate"] = action_array[5:]
+
+        if self.state == 0:
+            action["translate"] = np.array([action["translate_base"][0], action["translate_base"][1], 0])
+            action["rotate"] = np.array([0, 0, 0, 1])
 
         return action
 
@@ -320,7 +323,7 @@ class AgentPybulletOracle(AgentPybulletDemonstration):
 
         action = OrderedDict()
 
-        if self.welding_state == 0:
+        if self.state == 0:
             # state: moving base
             base_position_apx = np.average(np.array([self.objective[0][:2], self.plan[0][0][:2]]), axis=0)[:2] + np.array([0.25, -0.25])
             dist_vec = base_position_apx - obs["base_position"]
@@ -337,7 +340,7 @@ class AgentPybulletOracle(AgentPybulletDemonstration):
                 action["translate_base"] = obs["base_position"] + dist_vec
                 action["translate"] = obs["position"] + np.array([dist_vec[0], dist_vec[1], 0])
                 action["rotate"] = obs["rotation"]
-        elif self.welding_state == 1:
+        elif self.state == 1:
             # state: moving ee to weldseam start
             dist_vec = self.objective[0] - obs["position"]
             dist = np.linalg.norm(dist_vec)
@@ -356,7 +359,7 @@ class AgentPybulletOracle(AgentPybulletDemonstration):
                 action["translate"] = obs["position"] + dist_vec
                 action["rotate"] = quat_trajectory[1]
 
-        elif self.welding_state == 2:
+        elif self.state == 2:
             # state: moving ee along weldseam
             dist_vec = self.objective[0] - obs["position"]
             dist = np.linalg.norm(dist_vec)
@@ -374,7 +377,7 @@ class AgentPybulletOracle(AgentPybulletDemonstration):
                 action["translate_base"] = obs["base_position"]
                 action["translate"] = obs["position"] + dist_vec
                 action["rotate"] = quat_trajectory[1]
-        elif self.welding_state == 3:
+        elif self.state == 3:
             # state: moving ee back up so the base can move
             pass
         """
@@ -385,7 +388,7 @@ class AgentPybulletOracle(AgentPybulletDemonstration):
         print("objective")
         print(self.objective)
         print("state")
-        print(self.welding_state)
+        print(self.state)
         """
 
         return action

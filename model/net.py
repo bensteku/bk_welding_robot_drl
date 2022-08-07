@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 
 class SimpleNeuralNet(nn.Module):
     
@@ -40,4 +41,53 @@ class SimpleNeuralNet(nn.Module):
                 ret.append(layer(X))
 
         return torch.stack(ret)
-        
+
+class ActorNet(nn.Module):
+
+        def __init__(self, input_dim, output_dim, hidden_sizes):
+            super(ActorNet, self).__init__()
+            self.input_layer = nn.Linear(input_dim, hidden_sizes[0])
+            self.output_layer_mu = nn.Linear(hidden_sizes[-1], output_dim)
+            self.output_layer_sigma = nn.Linear(hidden_sizes[-1], output_dim)
+            self.hidden = nn.ModuleList()
+            for idx in range(len(hidden_sizes) - 1):
+                self.hidden.append(nn.Linear(hidden_sizes[idx], hidden_sizes[idx + 1]))
+
+            self.optimizer = torch.optim.Adam(self.parameters())
+
+        def forward(self, state):
+            X = self.input_layer(state)
+            X = torch.tanh(X)
+            for layer in self.hidden:
+                X = layer(X)
+                X = torch.tanh(X)
+            
+            mu = self.output_layer_mu(X)
+            mu = torch.tanh(mu)
+
+            sigma = self.output_layer_sigma(X)
+            sigma = torch.sigmoid(sigma)
+
+            return mu, sigma
+
+
+class CriticNet(nn.Module):
+
+    def __init__(self, input_dim, hidden_sizes):
+            super(CriticNet, self).__init__()
+            self.input_layer = nn.Linear(input_dim, hidden_sizes[0])
+            self.output_layer = nn.Linear(hidden_sizes[-1], 1)
+            self.hidden = nn.ModuleList()
+            for idx in range(len(hidden_sizes) - 1):
+                self.hidden.append(nn.Linear(hidden_sizes[idx], hidden_sizes[idx + 1]))
+
+            self.optimizer = torch.optim.Adam(self.parameters())
+
+    def forward(self, state, action):
+            X = self.input_layer(torch.hstack([state, action]))
+            X = torch.relu(X)
+            for layer in self.hidden:
+                X = layer(X)
+                X = torch.relu(X)
+
+            return self.output_layer(X)
