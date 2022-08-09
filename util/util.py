@@ -132,11 +132,11 @@ def pos_interpolate(pos1, pos2, speed):
         res.append(cur)
         return res
 
-def quaternion_dot(quat1, quat2):
-    return quat1[0] * quat2[0] + quat1[1] * quat2[1] + quat1[2] * quat2[2] + quat1[3] * quat2[3]
-
 def quaternion_similarity(quat1, quat2):
-    return 1 - np.abs(quaternion_dot(quat1, quat2))
+    """
+    Measure of similarity between two quaternions via the angle distance between the two
+    """
+    return 1 - np.arccos(2 * np.dot(quat1, quat2)**2 - 1)/np.pi
 
 def quaternion_apx_eq(quat1, quat2, thresh=5e-2):
     return  quaternion_similarity(quat1, quat2) < thresh
@@ -147,3 +147,12 @@ def exp_decay(x, max, zero_crossing):
     half = max/2.0
     three_halfs = max * 1.5
     return three_halfs * np.exp((np.log(1./3.)/(zero_crossing))*x) - half
+
+def rotate_vec(quat, vec):
+    work_vec = np.array([vec[0], vec[1], vec[2], 0])
+    return quaternion_multiply(quaternion_multiply(quat, work_vec), quaternion_invert(quat))[:3]
+
+def cosine_similarity(vec1, vec2):
+    norm = np.linalg.norm(vec1) * np.linalg.norm(vec2)
+    return np.dot(vec1, vec2) / norm
+    
