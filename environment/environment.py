@@ -229,6 +229,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         """
         Returns whether there is a collision anywhere between the robot and the specified object
         """
+        pyb.performCollisionDetection()  # perform just the collision detection part of the PyBullet engine
         return True if pyb.getContactPoints(self.robot, obj_id) else False
 
 
@@ -363,7 +364,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
     def _quat_w_to_ee(self, quat):
         """
         Takes an input quaternion in the world frame, rotates it such that it offsets the rotation of the welding torch
-        (meaning that a 0,0,0,1 input quaternion for the robot arm ee results in the same pose of the torch as loading it with the loadURDF method) 
+        (meaning that a [0,0,0,1] input quaternion for the robot arm ee results in the same pose of the torch as loading it with the loadURDF method) 
         and transforms it into the end effector frame (meaning that that inputs result in the correct rotation w.r.t the world frame)
         """
 
