@@ -9,6 +9,7 @@ class Node:
         self.q = np.array(q)
         self.parent = parent
         self.children = []
+        self.delta = 0
 
     def add_child(self, node):
         pass
@@ -27,14 +28,18 @@ class Tree:
         new = Node(q, closest)
         closest.children.append(new)
         self.nodes.append(new)
+        tmp = new.parent
+        while tmp.parent is not None:
+            tmp.delta += 1
+            tmp = tmp.parent
         return new
 
-    def nearest_neighbor(self, q):
+    def nearest_neighbor(self, q, control):
         min_dist = np.Inf
         closest = None
         for node in self.nodes:
             dist = np.linalg.norm(np.array(q) - np.array(node.q))
-            if dist < min_dist:
+            if dist < min_dist and node.delta < control:
                 min_dist = dist
                 closest = node
         return closest
@@ -63,8 +68,8 @@ def sample_fn(joints, lower, upper, collision):
     return sample
 
 def connect_fn(collision, epsilon = 1e-3):
-    def connect(tree, q):
-        node_near = tree.nearest_neighbor(q)
+    def connect(tree, q, control):
+        node_near = tree.nearest_neighbor(q, control)
         q_cur = node_near.q
         q_old = q_cur
         while True:   
@@ -83,7 +88,7 @@ def connect_fn(collision, epsilon = 1e-3):
                 return tree.add_node(q_old, node_near), 1
     return connect
 
-def path(node1, node2, tree1, tree2, q_start):
+def bi_path(node1, node2, tree1, tree2, q_start):
     
     if np.array_equal(tree1.root.q, q_start):
         nodeA = node1
@@ -108,52 +113,41 @@ def path(node1, node2, tree1, tree2, q_start):
 def free_fn(collision):
     
     def free(q_start, q_end, epsilon):
-        
-        diff = q_end - q_start
-        dist = np.linalg.norm(diff)
-
-        normed = diff / dist
-        delta = epsilon / dist
-
         tmp = q_start
-
-        while not np.array_equal(q_end, tmp):
-            tmp = tmp + normed * delta
-            if collision(tmp):
-                return False
-        
-        return True
-
+        while True:
+            dist = np.linalg.norm(q_end - tmp)
+            if epsilon > dist:
+                return True
+            else:
+                tmp = tmp + (epsilon/dist) * (q_end - tmp)
+                if collision(tmp):
+                    return False       
     
     return free
 
 def smooth_path(path, epsilon, free):
     path_smooth = [path[0]]
     cur = 0
-    cur_smooth = len(path)-1
 
-    while cur < len(path)-1:
-
-        while cur < cur_smooth:
-
-            if free(path[cur_smooth], path[cur], epsilon):
-                path_smooth.append(path[cur_smooth])
-                cur = cur_smooth
+    while cur < len(path) - 1:
+        print(path_smooth)
+        for idx, pose in reversed(list(enumerate(path[cur+1:]))):
+            if free(path[cur], pose, epsilon):
+                path_smooth.append(pose)
+                cur = idx+cur
                 break
-            else:
-                cur_smooth -= 1
-        
-        cur_smooth = len(path)-1
+        cur += 1
 
     return path_smooth
 
-def bi_rrt(q_start, q_final, goal_bias, robot, joints, obj, max_steps, epsilon, force_swap=100, smooth=False):
+def bi_rrt(q_start, q_final, goal_bias, robot, joints, obj, max_steps, epsilon, force_swap=100, smooth=True):
     start = time()
     treeA = Tree(q_start)
     treeB = Tree(q_final)
 
-    R = np.linalg.norm(np.array(q_final) - np.array(q_start))
-    control = 1
+    rA = np.linalg.norm(np.array(q_final) - np.array(q_start))
+    rB = rA
+    controlA, controlB = 1, 1
 
     collisionA, triesA, ratioA = 0., 0., 1
     collisionB, triesB, ratioB = 0., 0., 1
@@ -174,50 +168,37 @@ def bi_rrt(q_start, q_final, goal_bias, robot, joints, obj, max_steps, epsilon, 
         random = np.random.random()
         if random > goal_bias:
             q_rand = sample()
-            if np.linalg.norm(q_rand - treeB.root.q) > R:
+            if np.linalg.norm(q_rand - treeB.root.q) > rA:
                 continue 
         else:
             q_rand = treeB.root.q
 
-        reached_nodeA, status = connect(treeA, q_rand)
+        reached_nodeA, status = connect(treeA, q_rand, controlA)
         triesA += 1.
         if status == 2:  # hit an obstacle an epsilon after nearest neighbor
             collisionA += 1.
-            R = R + epsilon * 50
-        elif status == 1:  # expand at least one epsilon into the direction of q_rand, but hit an obstacle before reaching it
-            collisionA += 1.
-            R = R + epsilon * 50
-            reached_nodeB, status = connect(treeB, reached_nodeA.q)
+            rA = rA + epsilon * 50
+            controlA = 3
+        else:  # expand at least one epsilon into the direction of q_rand, but hit an obstacle before reaching it
+            rA = rA = np.linalg.norm(reached_nodeA.q - treeB.root.q)
+            controlA = 1
+            reached_nodeB, status = connect(treeB, reached_nodeA.q, controlB)
             triesB += 1.
             if status == 0:  # could connect new node to other tree
-                pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
-                sol = path(reached_nodeA, reached_nodeB, treeA, treeB, q_start)
+                sol = bi_path(reached_nodeA, reached_nodeB, treeA, treeB, q_start)
                 solution_found = time()
                 print("Solution found")
                 print("Time for solution: "+str(solution_found-start))
                 if not smooth:
+                    pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
                     return sol
                 else:
                     smoothed = smooth_path(sol, epsilon, free)
                     print("Time for smoothing: "+str(time()-solution_found))
-                    return smoothed
-            else:
-                collisionB += 1
-        elif status == 0:
-            R = np.linalg.norm(reached_nodeA.q - treeB.root.q)
-        """
-        if reached_nodeA is not None:
-            reached_nodeB = connect(treeB, reached_nodeA.q)
-            triesB += 1.
-            if reached_nodeB is not None:
-                if np.array_equal(reached_nodeA.q, reached_nodeB.q):
                     pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
-                    return path(reached_nodeA, reached_nodeB, treeA, treeB, q_start)
-            else:
-                collisionB += 1.
-        else:
-            collisionA += 1.
-        """
+                    return smoothed
+            elif status == 2:
+                collisionB += 1
 
         # tree swap
         ratioA = collisionA / triesA
@@ -227,10 +208,74 @@ def bi_rrt(q_start, q_final, goal_bias, robot, joints, obj, max_steps, epsilon, 
             collisionA, collisionB = collisionB, collisionA
             triesA, triesB = triesB, triesA
             ratioA, ratioB = ratioB, ratioA
+            rA, rB = rB, rA
+            controlA, controlB = controlB, controlA
         if i % 10 == 0:
             print(str(i+1) + " Steps")
             print("Current Tree has "+str(len(treeA.nodes))+" nodes.")
             print("Failure to connect rate: "+str(ratioA))
+    pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
+    
+    return None
+
+def path(tree, end_node):
+    path = [end_node.q]
+    tmp = end_node
+    while tmp.parent is not None:
+        tmp = tmp.parent
+        path.append(tmp.q)
+
+    return list(reversed(path))
+
+def rrt(q_start, q_final, goal_bias, robot, joints, obj, max_steps, epsilon, smooth=False):
+    start = time()
+    tree = Tree(q_start)
+
+    R = np.linalg.norm(np.array(q_final) - np.array(q_start))
+    control = 1
+
+    pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)
+    collision = collision_fn(robot, joints, obj)
+    if smooth:
+        free = free_fn(collision)
+    lower = []
+    upper = []
+    for joint in joints:
+        lower.append(pyb.getJointInfo(robot, joint)[8])
+        upper.append(pyb.getJointInfo(robot, joint)[9])
+    sample = sample_fn(joints, lower, upper, collision)
+    connect = connect_fn(collision, epsilon)
+
+    for i in range(max_steps):
+        random = np.random.random()
+        if random > goal_bias:
+            q_rand = sample()
+            if np.linalg.norm(q_rand - q_final) > R:
+                continue 
+        else:
+            q_rand = q_final
+
+        reached_node, status = connect(tree, q_rand, control)
+        if status == 2:  # hit an obstacle an epsilon after nearest neighbor
+            R = R + epsilon * 50
+            control = 3
+        else:
+            R = np.linalg.norm(reached_node.q - q_final)
+            control = 1
+            if R == 0:
+                sol = path(tree, reached_node)
+                solution_found = time()
+                print("Solution found")
+                print("Time for solution: "+str(solution_found-start))
+                if smooth:
+                    smooth = smooth_path(sol, epsilon, free)
+                    print("Time for smoothing: "+str(time()-solution_found))
+                    return smooth
+
+
+        if i % 10 == 0:
+            print(str(i+1) + " Steps")
+            print("Current Tree has "+str(len(tree.nodes))+" nodes.")
     pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
     
     return None
