@@ -38,12 +38,12 @@ import pybullet_planning as pybp
 #    sleep(1.5)
 #input("waiting again")
 pybp.set_joint_positions(e.robot, e.joints, currj)
-path = planner.bi_rrt(currj, goal, 0.10, e.robot, e.joints, e.obj_ids["fixed"][0], 500000)
+path = planner.bi_rrt(currj, goal, 0.20, e.robot, e.joints, e.obj_ids["fixed"][0], 500000, 1e-3)
 path = planner.interpolate_path(path)
 input("Waiting")
 for pose in path:
     pybp.set_joint_positions(e.robot, e.joints, pose)
-    sleep(0.025)
+    sleep(0.015)
 #e.obj_ids["fixed"]
 
 """
