@@ -1,3 +1,4 @@
+from argparse import ArgumentError
 import numpy as np
 import pybullet as pyb
 from scipy.interpolate import interp1d
@@ -51,7 +52,7 @@ def collision_fn(robot, joints, obj):
             pyb.resetJointState(robot, joint, val)    
         #pyb.addUserDebugPoints([pyb.getLinkState(robot, 7, computeForwardKinematics=True)[0]],[[0,0,1]], 3)
         pyb.performCollisionDetection()  # perform just the collision detection part of the PyBullet engine
-        col_env = True if pyb.getContactPoints(robot, obj) or pyb.getContactPoints(robot, 1) else False
+        col_env = True if pyb.getContactPoints(robot, obj) or pyb.getContactPoints(robot, 1) else False  # 1 will always be the ground plane
         for joint, val in zip(joints, currj):
             pyb.resetJointState(robot, joint, val)
         #col_self = True if pyb.getContactPoints(robot, robot, 1, 7) else False
@@ -130,7 +131,6 @@ def smooth_path(path, epsilon, free):
     cur = 0
 
     while cur < len(path) - 1:
-        print(path_smooth)
         for idx, pose in reversed(list(enumerate(path[cur+1:]))):
             if free(path[cur], pose, epsilon):
                 path_smooth.append(pose)
@@ -154,6 +154,8 @@ def bi_rrt(q_start, q_final, goal_bias, robot, joints, obj, max_steps, epsilon, 
 
     pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)
     collision = collision_fn(robot, joints, obj)
+    if collision(q_final) or collision(q_start):
+        raise ValueError("Either starting or goal configuration is in collision in work space!")
     if smooth:
         free = free_fn(collision)
     lower = []
@@ -281,7 +283,7 @@ def rrt(q_start, q_final, goal_bias, robot, joints, obj, max_steps, epsilon, smo
     return None
 
 def interpolate_path(path):
-    ret = [path[0]]
+    ret = []
     scale_factors = []
     for idx in range(len(path)-1):
         dist = np.linalg.norm(path[idx] - path[idx+1])
@@ -292,7 +294,7 @@ def interpolate_path(path):
     for idx in range(len(path)-1):
         values = np.vstack([path[idx], path[idx+1]])
         interpolator = interp1d([0,1], values, axis=0)
-        interp_values = np.linspace(0,1, int(1000*scale_factors[idx]))
+        interp_values = np.linspace(0,1, int(50*scale_factors[idx]))
         for value in interp_values:
             ret.append(interpolator(value))
 

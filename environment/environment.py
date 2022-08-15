@@ -185,6 +185,19 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
     # methods for dealing with pybullet environment #
     #################################################
 
+    def get_joint_state(self):
+        """
+        Returns a list with the angles of the current robot configuration.
+        """
+        return np.array([pyb.getJointState(self.robot, i)[0] for i in self.joints])
+
+    def set_joint_state(self, config):
+        """
+        Debug method for setting the joints of the robot to a certain configuration. Will kill all physics, momentum, movement etc. going on.
+        """
+        for i in range(len(self.joints)):
+            pyb.resetJointState(self.robot, self.joints[i], config[i])
+
     def switch_tool(self, tool):
         """
         Switches out the welding torch, but only if the robot is very close to default configuration.
@@ -244,21 +257,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                 # if somehow the order of dict entries in the observation space OrderedDict changes, then the order of the next lines defining the entries of the new state needs to be switched as well
                 new_state["base_position"] = state["base_position"] + action["translate_base"]
                 new_state["position"] = state["position"] + action["translate"]
-                new_state["rotation"] = self._quat_w_to_ee(quaternion_multiply(state["rotation"], action["rotate"]))
-                """
-                print("state")
-                print(state)
-                print("action")
-                print(action)
-                print("new state")
-                print(new_state)
-                print("enthalten")
-                print(self.observation_space.contains(new_state))
-                print("beispiel")
-                print(self.observation_space.sample())
-                """              
-                #if not self.observation_space.contains(new_state):
-                #    return False  # if the current state+action results in invalid state, return false and do nothing
+                new_state["rotation"] = self._quat_w_to_ee(action["rotate"])         
                 
             # ....otherwise use it as is
             else:
@@ -334,6 +333,25 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         joints = np.float32(joints)
         joints[2:] = (joints[2:] + np.pi) % (2 * np.pi) - np.pi
         return joints
+
+    def solve_fk(self, config):
+        """
+        Gets the robot pose associated with a certain configuration.
+        Involves actually setting the robot to the desired spot and then reading the ee state,
+        apparently there is no more elegant way as Pybullet does not expose the necessary matrices.
+        """
+        currj = [pyb.getJointState(self.robot, i)[0] for i in self.joints]
+        pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)  # turn off rendering
+        for i in range(len(self.joints)):
+            pyb.resetJointState(self.robot, self.joints[i], config[i])
+        state = pyb.getLinkState(
+                            bodyUniqueId=self.robot,
+                            linkIndex=self.end_effector_link_id[self.robot_name],
+                            computeForwardKinematics=True)
+        for i in range(len(self.joints)):
+            pyb.resetJointState(self.robot, self.joints[i], currj[i])
+        pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)  # turn rendering back on
+        return (np.array(state[0]), np.array(state[1]))
 
     @property
     def is_static(self):
@@ -543,5 +561,63 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
 
             self.movep(([x,y,z],command_quat))
 
-if __name__ == "__main__":
-    e = WeldingEnvironmentPybullet("../assets/",True)
+class WeldingEnvironmentPybulletConfigSpace(WeldingEnvironmentPybullet):
+
+    def __init__(self,
+                agent,
+                asset_files_path,
+                display=False,
+                hz=240,
+                robot="ur5",
+                relative_movement=False):
+
+        super().__init__(agent, asset_files_path, display, hz, robot, relative_movement)
+
+    def _perform_action(self, action):
+        if action is not None:
+            # if relative movement is enabled, action must be transformed into absolute movement needed for robot control...
+            state = self._get_obs()
+            new_state = OrderedDict()
+            if self._relative_movement:
+                # unfortunately, the order of dict entries matters to the gym contains() method here
+                # if somehow the order of dict entries in the observation space OrderedDict changes, then the order of the next lines defining the entries of the new state needs to be switched as well
+                new_state["base_position"] = state["base_position"] + action["translate_base"]
+                new_state["joints"] = action["joints"]        
+                
+            # ....otherwise use it as is
+            else:
+                new_state["base_position"] = action["translate_base"]
+                new_state["position"] = action["translate"]
+                new_state["rotation"] = self._quat_w_to_ee(action["rotate"])
+                if not self.observation_space.contains(new_state):
+                    return False  # if the new state is invalid, return false and do nothing
+
+            # first move the base of the robot...(but only if the new location is sufficiently different from the old one to prevent constant)
+            if np.linalg.norm(new_state["base_position"]-state["base_position"]) > 1e-4:
+                pyb.resetBasePositionAndOrientation(self.robot, np.append(new_state["base_position"], self.fixed_height[self.robot_name]), pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
+            # ...then the joints
+            timeout = self.movej(new_state["joints"])
+            if timeout:
+                return timeout
+        
+        while not self.is_static:
+            pyb.stepSimulation()
+
+    def _get_obs(self):
+        tmp = pyb.getLinkState(
+                            bodyUniqueId=self.robot,
+                            linkIndex=self.end_effector_link_id[self.robot_name],
+                            computeForwardKinematics=True  # need to check if this is necessary, if not can be turned off for performance gain
+            )
+        tmp2 = pyb.getLinkState(
+                            bodyUniqueId=self.robot,
+                            linkIndex=self.base_link_id[self.robot_name],
+                            computeForwardKinematics=True  # need to check if this is necessary, if not can be turned off for performance gain
+            )
+        return {
+            'position': np.array(tmp[0]),
+            'base_position':np.array(tmp2[4][:2]),  # only xy position of baselink
+            'rotation': self._quat_ee_to_w(np.array(tmp[1])),  # the quaternion given by getLinkState is in ee frame, we transform it to world frame (because our target rotations are in world frame)
+            'joints': self.get_joint_state()
+        }  
+        

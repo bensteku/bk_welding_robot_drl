@@ -1,13 +1,10 @@
 import environment.environment as env
-import xml.etree.ElementTree as ET
 import os
 import numpy as np
 from util import xml_parser, util, planner
-from scipy.spatial.transform import Rotation
 from collections import OrderedDict
 from model import model
 import pybullet as pyb
-import pybullet_planning as pybp
 from model.model import AgentModelSimple
 
 PYBULLET_SCALE_FACTOR = 0.0005
@@ -71,8 +68,8 @@ class AgentPybullet(Agent):
         super().__init__(asset_files_path)
         self.xyz_offset = np.array((0, 0, 0.01))  # offset in pybullet coordinates, location to place the objects into
         self.base_pos_reward_thresh = 0.5
-        self.ee_pos_reward_thresh = 5e-2  # really TODO
-        self.quat_sim_thresh = 1e-4  # this probably too
+        self.ee_pos_reward_thresh = 8e-2  # really TODO
+        self.quat_sim_thresh = 4e-2  # this probably too
         self.current_part_id = None
 
     def load_object_into_env(self, index):
@@ -179,9 +176,9 @@ class AgentPybullet(Agent):
                 reward += (-10.0/(9*self.base_pos_reward_thresh**2)) * distance ** 2 + 10  # quadratic function: 10 at threshold, 0 at 3*threshold
         elif self.state == 3:
             # move upwards
-            distance = np.linalg.norm(np.array([obs["position"][0], obs["position"], 0.5]) - obs["position"]) 
+            distance = np.linalg.norm(np.array([obs["position"][0], obs["position"][1], 0.5]) - obs["position"]) 
             #reward += (-10.0/(9*self.base_pos_reward_thresh**2)) * distance ** 2 + 10
-            reward += util.exp_decay(distance, 20, 3*distance)
+            reward += util.exp_decay(distance, 20, 5*self.ee_pos_reward_thresh)
         else:
             # if the arm is in welding mode give out a reward in concordance to how far away it is from the desired position and how closely
             # it matches the ground truth rotation
@@ -193,11 +190,14 @@ class AgentPybullet(Agent):
                 pos_done = True  # objective achieved
             else:
                 #reward += (-20.0/(9*self.ee_pos_reward_thresh**2)) * distance ** 2 + 20  # quadratic function: 20 at threshold, 0 at 3*threshold
-                reward += util.exp_decay(distance, 20, 3*distance)
+                reward += util.exp_decay(distance, 20, 20*self.ee_pos_reward_thresh)
             
             quat_sim = util.quaternion_similarity(self.objective[2], obs["rotation"])    
-            if quat_sim < 1-self.quat_sim_thresh:
+            if quat_sim > 1-self.quat_sim_thresh:
                 rot_done = True
+
+            print(distance, self.ee_pos_reward_thresh)
+            print(quat_sim, 1-self.quat_sim_thresh)
             
             reward = reward * (quat_sim**0.5)
         if timeout:
@@ -249,6 +249,7 @@ class AgentPybulletRRTPlanner(AgentPybullet):
 
     def __init__(self, asset_files_path):
         super().__init__(asset_files_path)
+        self.trajectory = []
 
     def act(self, obs):
 
@@ -256,3 +257,51 @@ class AgentPybulletRRTPlanner(AgentPybullet):
             self._set_plan()
         if not self.objective:
             self._set_objective()
+
+        action = OrderedDict()
+        action["translate_base"] = np.array([0, 0])
+        action["joints"] = obs["joints"]
+        #action["translate"] = np.array([0, 0, 0])
+        #action["rotate"] = np.array([0, 0, 0, 1])
+
+        if self.state == 0:
+            self.trajectory = []  # safety override such that old trajectories that weren't finished due to being close enough to their target to cause state transition get removed
+            diff = self.objective[0][:2] - obs["base_position"]
+            dist = np.linalg.norm(diff)
+            if dist < self.env.base_speed:
+                action["translate_base"] = diff
+                #action["translate"] = np.array([diff[0], diff[1], 0.5 - obs["position"][2]])
+            else:
+                diff = diff * (self.env.base_speed/dist)
+                action["translate_base"] = diff
+                #action["translate"] = np.array([diff[0], diff[1], 0.5 - obs["position"][2]])
+        elif self.state == 1:
+            if not self.trajectory:
+                q_cur = self.env.get_joint_state()
+                q_goal = self.env.solve_ik((self.objective[0] + self.objective[1][0] * 0.02 + self.objective[1][1] * 0.02, self.env._quat_w_to_ee(self.objective[2])))
+                traj_raw = planner.bi_rrt(q_cur, q_goal, 0.15, self.env.robot, self.env.joints, self.env.obj_ids["fixed"][0], 500000, 1e-3, 300)
+                self.trajectory = planner.interpolate_path(traj_raw)
+            next_q = self.trajectory.pop(0)
+            #pos, quat = self.env.solve_fk(next_q)
+            #action["translate"] = pos - obs["position"]
+            #action["rotate"] = quat
+            action["joints"] = next_q
+        elif self.state == 2:
+            self.trajectory = []  # safety override such that old trajectories that weren't finished due to being close enough to their target to cause state transition get removed
+            diff = (self.objective[0] + self.objective[1][0] * 0.02 + self.objective[1][1] * 0.02) - obs["position"]
+            dist = np.linalg.norm(diff)
+            if dist < self.env.pos_speed:
+                #action["translate"] = diff
+                q_next = self.env.solve_ik((self.objective[0] + self.objective[1][0] * 0.02 + self.objective[1][1] * 0.02, self.env._quat_w_to_ee(self.objective[2])))
+                action["joints"] = q_next
+            else:
+                diff = diff * (self.env.pos_speed/dist)
+                q_next = self.env.solve_ik((diff + obs["position"], self.env._quat_w_to_ee(self.objective[2])))
+                action["joints"] = q_next
+                #action["translate"] = diff
+            print("diff")
+            print(diff)
+            print(q_next, obs["joints"])
+
+        return action
+
