@@ -17,7 +17,7 @@ while not done:
     #print(e._get_obs())
     #print("action")
     #print(act["translate_base"], act["translate"], act["rotate"])
-    print("state")
+    print("agent state")
     print(a.state)
     print("objective")
     print(a.objective[0])
@@ -25,10 +25,12 @@ while not done:
     #    for i in a.trajectory:
     #        e.movej(i)
     obs, reward, done, info = e.step(act)
+    print("obs")
+    print(obs["position"], obs["rotation"])
     if info:
         a.trajectory = []
     print("reward")
     print(reward)
-    sleep(0.5)
+    sleep(0.05)
 
 e.close()

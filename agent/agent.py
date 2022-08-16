@@ -207,7 +207,7 @@ class AgentPybullet(Agent):
             reward = reward * (quat_sim**0.5)
         if timeout:
             reward -= 75
-        if self.env.is_in_collision(self.current_pard_id):
+        if self.env.is_in_collision(self.current_pard_id) and not (pos_done and rot_done):
             reward -= 150
             pos_done = False
             rot_done = False
@@ -294,7 +294,7 @@ class AgentPybulletRRTPlanner(AgentPybullet):
             action["joints"] = next_q
         elif self.state == 2:
             if not self.trajectory:
-                pos = util.pos_interpolate(obs["position"], self.objective[0] + self.objective[1][0] * 0.05 + self.objective[1][1] * 0.05, self.env.pos_speed/2)
+                pos = util.pos_interpolate(obs["position"], self.objective[0] + self.objective[1][0] * 0.025 + self.objective[1][1] * 0.025, self.env.pos_speed/2)
                 quat = util.quaternion_interpolate(obs["rotation"], self.objective[2], len(pos)-2)
                 quat = [self.env._quat_w_to_ee(qu) for qu in quat]
                 self.trajectory = list(zip(pos, quat))
@@ -318,4 +318,3 @@ class AgentPybulletRRTPlanner(AgentPybullet):
             action["joints"] = next_q
 
         return action
-

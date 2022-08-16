@@ -245,6 +245,21 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         pyb.performCollisionDetection()  # perform just the collision detection part of the PyBullet engine
         return True if pyb.getContactPoints(self.robot, obj_id) else False
 
+    def config_is_in_collision(self, obj_id, config):
+        """
+        Returns whether there is a collision anywhere between the robot and the specified object if the robot is in the specified configuration
+        """
+        pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)
+        currj = [pyb.getJointState(self.robot, i)[0] for i in self.joints]
+        for joint, val in zip(self.joints, config):
+            pyb.resetJointState(self.robot, joint, val)    
+        pyb.performCollisionDetection()  # perform just the collision detection part of the PyBullet engine
+        col_env = True if pyb.getContactPoints(self.robot, obj_id) or pyb.getContactPoints(self.robot, 1) else False  # 1 will always be the ground plane
+        for joint, val in zip(self.joints, currj):
+            pyb.resetJointState(self.robot, joint, val)
+        pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
+        return col_env
+
 
     def _perform_action(self, action):
 
@@ -328,8 +343,8 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             upperLimits=self.joints_upper[self.robot_name],
             jointRanges=self.joints_range[self.robot_name],
             restPoses=np.float32(self.resting_pose_angles[self.robot_name]).tolist(),
-            maxNumIterations=100,
-            residualThreshold=1e-5)
+            maxNumIterations=500,
+            residualThreshold=1e-6)
         joints = np.float32(joints)
         joints[2:] = (joints[2:] + np.pi) % (2 * np.pi) - np.pi
         return joints
