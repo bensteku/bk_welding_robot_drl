@@ -127,6 +127,10 @@ def free_fn(collision):
     return free
 
 def smooth_path(path, epsilon, free):
+    """
+    Takes a working path and smoothes it by checking if intermediate steps can be skipped.
+    Greedy and thus pretty slow.
+    """
     path_smooth = [path[0]]
     cur = 0
 
@@ -141,23 +145,52 @@ def smooth_path(path, epsilon, free):
     return path_smooth
 
 def bi_rrt(q_start, q_final, goal_bias, robot, joints, obj, max_steps, epsilon, force_swap=100, smooth=True):
+    """
+    Performs RRT algorithm with two trees that are swapped out if certain conditions apply.
+    Params:
+        - q_start: list/array of starting configuration for robot
+        - q_final: list/array of goal configuration for robot
+        - goal_bias: number between 0 and 1, determines the probability that the random sample of the algorithm is replaced with the goal configuration
+        - robot: Pybullet of the robot which the algorithm is running for
+        - joints: list of Pybullet joint ids of the above robot
+        - obj: Pybullet object id for which the collision check is performed
+        - max_steps: cutoff for iterations of the algorithm before no solution will be returned
+        - epsilon: config space step size for collision check
+        - force_swap: number of times one of the two trees can stay swapped in before a swap will be forced
+        - smooth: determines if the result path will be smoothed, takes some time
+    """
+    # start time for time output down below
     start = time()
+
+    # init the two trees
     treeA = Tree(q_start)
     treeB = Tree(q_final)
 
+    # init the two max radii for biased sampling
     rA = np.linalg.norm(np.array(q_final) - np.array(q_start))
     rB = rA
+
+    # init control factor to preferably connect to boundary nodes
     controlA, controlB = 1, 1
 
+    # init the variables that count the ratio of failed connect attempts, used for determining swap condition below
     collisionA, triesA, ratioA = 0., 0., 1
     collisionB, triesB, ratioB = 0., 0., 1
 
+    # stop Pybullet rendering to save performance
     pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)
+    # get collision function for our robot and obstacle
     collision = collision_fn(robot, joints, obj)
-    if collision(q_final) or collision(q_start):
-        raise ValueError("Either starting or goal configuration is in collision in work space!")
+
+    # check if either start or finish is in collision
+    if collision(q_final):
+        raise ValueError("Goal configuration is in collision in work space!")
+    elif collision(q_start):
+        raise ValueError("Starting configuration is in collision in work space!")
     if smooth:
         free = free_fn(collision)
+    
+    # prepare sample and connect function for our robot
     lower = []
     upper = []
     for joint in joints:
@@ -166,27 +199,43 @@ def bi_rrt(q_start, q_final, goal_bias, robot, joints, obj, max_steps, epsilon, 
     sample = sample_fn(joints, lower, upper, collision)
     connect = connect_fn(collision, epsilon)
 
+    # main algorithm
     for i in range(max_steps):
+
+        # sampling:
         random = np.random.random()
         if random > goal_bias:
+            # get random configuration
             q_rand = sample()
             if np.linalg.norm(q_rand - treeB.root.q) > rA:
+                # resample if it's not in the allowable radius
                 continue 
         else:
+            # try goal node
             q_rand = treeB.root.q
 
+        # try to connect sampled node to tree
+        # status is an int giving information about the process, reachedNode is the tree node if connected or None if unsuccesful
         reached_nodeA, status = connect(treeA, q_rand, controlA)
+        # increment connect tries
         triesA += 1.
-        if status == 2:  # hit an obstacle an epsilon after nearest neighbor
+        if status == 2:  # case: hit an obstacle in one epsilon after nearest neighbor
+            # increment direct collisions
             collisionA += 1.
+            # make sampling radius larger
             rA = rA + epsilon * 50
+            # (temporarily) allow nodes from inside the tree to be connected to
             controlA = 3
-        else:  # expand at least one epsilon into the direction of q_rand, but hit an obstacle before reaching it
+        else:  # case: succesful connection or hit an obstacle after progressing at least one epsilon towards sampled config
+            # update search radius
             rA = rA = np.linalg.norm(reached_nodeA.q - treeB.root.q)
+            # reset allowed connects to only boundary nodes
             controlA = 1
+            # try to reach the new node from the other tree
             reached_nodeB, status = connect(treeB, reached_nodeA.q, controlB)
             triesB += 1.
             if status == 0:  # could connect new node to other tree
+                # get path from start to finish
                 sol = bi_path(reached_nodeA, reached_nodeB, treeA, treeB, q_start)
                 solution_found = time()
                 print("Solution found")
@@ -203,8 +252,10 @@ def bi_rrt(q_start, q_final, goal_bias, robot, joints, obj, max_steps, epsilon, 
                 collisionB += 1
 
         # tree swap
+        # calculate ratio of collisions to succesful connects
         ratioA = collisionA / triesA
         ratioB = 1 if triesB == 0 else collisionB / triesB
+        # the tree with the higher ratio stays in, such that more samples to go the tree that is near obstacles
         if ratioB > ratioA or i%force_swap==0:
             treeA, treeB = treeB, treeA
             collisionA, collisionB = collisionB, collisionA
@@ -212,7 +263,7 @@ def bi_rrt(q_start, q_final, goal_bias, robot, joints, obj, max_steps, epsilon, 
             ratioA, ratioB = ratioB, ratioA
             rA, rB = rB, rA
             controlA, controlB = controlB, controlA
-        if i % 10 == 0:
+        if i % 250 == 0:
             print(str(i+1) + " Steps")
             print("Current Tree has "+str(len(treeA.nodes))+" nodes.")
             print("Failure to connect rate: "+str(ratioA))

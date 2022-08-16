@@ -25,6 +25,8 @@ while not done:
     #    for i in a.trajectory:
     #        e.movej(i)
     obs, reward, done, info = e.step(act)
+    if info:
+        a.trajectory = []
     print("reward")
     print(reward)
     sleep(0.5)

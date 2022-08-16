@@ -114,12 +114,12 @@ def pos_interpolate(pos1, pos2, speed):
     delta_norm = np.linalg.norm(delta)
 
     if delta_norm <= speed:
-        return [pos2]
+        return [pos1, pos2]
     else:
         segments = delta_norm / speed
         delta = delta / delta_norm
         delta = delta * speed
-        res = []
+        res = [pos1]
         cur = pos1
         counter = 1
         while counter <= int(segments):

@@ -178,7 +178,12 @@ class AgentPybullet(Agent):
             # move upwards
             distance = np.linalg.norm(np.array([obs["position"][0], obs["position"][1], 0.5]) - obs["position"]) 
             #reward += (-10.0/(9*self.base_pos_reward_thresh**2)) * distance ** 2 + 10
-            reward += util.exp_decay(distance, 20, 5*self.ee_pos_reward_thresh)
+            if distance < self.ee_pos_reward_thresh:
+                reward += 10
+                pos_done = True
+                rot_done = True
+            else:
+                reward += util.exp_decay(distance, 10, 5*self.ee_pos_reward_thresh)
         else:
             # if the arm is in welding mode give out a reward in concordance to how far away it is from the desired position and how closely
             # it matches the ground truth rotation
@@ -204,6 +209,8 @@ class AgentPybullet(Agent):
             reward -= 75
         if self.env.is_in_collision(self.current_pard_id):
             reward -= 150
+            pos_done = False
+            rot_done = False
 
         if pos_done and rot_done:
             self.objective = None
@@ -265,7 +272,6 @@ class AgentPybulletRRTPlanner(AgentPybullet):
         #action["rotate"] = np.array([0, 0, 0, 1])
 
         if self.state == 0:
-            self.trajectory = []  # safety override such that old trajectories that weren't finished due to being close enough to their target to cause state transition get removed
             diff = self.objective[0][:2] - obs["base_position"]
             dist = np.linalg.norm(diff)
             if dist < self.env.base_speed:
@@ -278,8 +284,8 @@ class AgentPybulletRRTPlanner(AgentPybullet):
         elif self.state == 1:
             if not self.trajectory:
                 q_cur = self.env.get_joint_state()
-                q_goal = self.env.solve_ik((self.objective[0] + self.objective[1][0] * 0.02 + self.objective[1][1] * 0.02, self.env._quat_w_to_ee(self.objective[2])))
-                traj_raw = planner.bi_rrt(q_cur, q_goal, 0.15, self.env.robot, self.env.joints, self.env.obj_ids["fixed"][0], 500000, 1e-3, 300)
+                q_goal = self.env.solve_ik((self.objective[0] + self.objective[1][0] * 0.025 + self.objective[1][1] * 0.025, self.env._quat_w_to_ee(self.objective[2])))
+                traj_raw = planner.bi_rrt(q_cur, q_goal, 0.15, self.env.robot, self.env.joints, self.env.obj_ids["fixed"][0], 500000, 5e-4, 300)
                 self.trajectory = planner.interpolate_path(traj_raw)
             next_q = self.trajectory.pop(0)
             #pos, quat = self.env.solve_fk(next_q)
@@ -287,21 +293,29 @@ class AgentPybulletRRTPlanner(AgentPybullet):
             #action["rotate"] = quat
             action["joints"] = next_q
         elif self.state == 2:
-            self.trajectory = []  # safety override such that old trajectories that weren't finished due to being close enough to their target to cause state transition get removed
-            diff = (self.objective[0] + self.objective[1][0] * 0.02 + self.objective[1][1] * 0.02) - obs["position"]
-            dist = np.linalg.norm(diff)
-            if dist < self.env.pos_speed:
-                #action["translate"] = diff
-                q_next = self.env.solve_ik((self.objective[0] + self.objective[1][0] * 0.02 + self.objective[1][1] * 0.02, self.env._quat_w_to_ee(self.objective[2])))
-                action["joints"] = q_next
-            else:
-                diff = diff * (self.env.pos_speed/dist)
-                q_next = self.env.solve_ik((diff + obs["position"], self.env._quat_w_to_ee(self.objective[2])))
-                action["joints"] = q_next
-                #action["translate"] = diff
-            print("diff")
-            print(diff)
-            print(q_next, obs["joints"])
+            if not self.trajectory:
+                pos = util.pos_interpolate(obs["position"], self.objective[0] + self.objective[1][0] * 0.05 + self.objective[1][1] * 0.05, self.env.pos_speed/2)
+                quat = util.quaternion_interpolate(obs["rotation"], self.objective[2], len(pos)-2)
+                quat = [self.env._quat_w_to_ee(qu) for qu in quat]
+                self.trajectory = list(zip(pos, quat))
+            next_pose = self.trajectory.pop(0)
+            q_next = self.env.solve_ik(next_pose)
+            action["joints"] = q_next
+        elif self.state == 3:
+            if not self.trajectory:
+                q_cur = self.env.get_joint_state()
+                # move ee to halfway between base and current position and height 0.5
+                diff = (obs["base_position"] - obs["position"][:2])/2
+                goal_pos = diff + obs["position"][:2]
+                goal_pos = np.array([goal_pos[0], goal_pos[1], 0.5])
+                q_goal = self.env.solve_ik((goal_pos, self.env._quat_w_to_ee(np.array([0, 0, 0, 1]))))
+                traj_raw = planner.bi_rrt(q_cur, q_goal, 0.15, self.env.robot, self.env.joints, self.env.obj_ids["fixed"][0], 500000, 1e-3, 300)
+                self.trajectory = planner.interpolate_path(traj_raw)
+            next_q = self.trajectory.pop(0)
+            #pos, quat = self.env.solve_fk(next_q)
+            #action["translate"] = pos - obs["position"]
+            #action["rotate"] = quat
+            action["joints"] = next_q
 
         return action
 
