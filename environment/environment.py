@@ -635,4 +635,26 @@ class WeldingEnvironmentPybulletConfigSpace(WeldingEnvironmentPybullet):
             'rotation': self._quat_ee_to_w(np.array(tmp[1])),  # the quaternion given by getLinkState is in ee frame, we transform it to world frame (because our target rotations are in world frame)
             'joints': self.get_joint_state()
         }  
+
+    def movej(self, targj, speed=0.05, timeout=0.025, use_dynamics=True):
+        
+        if use_dynamics:
+            super().movej(targj, speed, timeout)
+        else:
+            currj = [pyb.getJointState(self.robot, i)[0] for i in self.joints]
+            currj = np.array(currj)
+            diffj = targj - currj
+            while all(np.abs(diffj) > 1e-2):
+                # Move with constant velocity
+                norm = np.linalg.norm(diffj)
+                v = diffj / norm if norm > 0 else 0
+                stepj = currj + v * speed
+                self.set_joint_state(stepj)
+                pyb.stepSimulation()
+
+                currj = [pyb.getJointState(self.robot, i)[0] for i in self.joints]
+                currj = np.array(currj)
+                diffj = targj - currj
+            return False
+
         
