@@ -5,37 +5,47 @@ from scipy.interpolate import interp1d
 from time import time
 
 class Node:
+    """
+    Class for nodes in the Rapidly Exploring Random Tree.
+    """
     
     def __init__(self, q, parent):
-        self.q = np.array(q)
+        self.q = np.array(q)  # configuration of a robot
         self.parent = parent
-        self.children = []
-        self.delta = 0
-
-    def add_child(self, node):
-        pass
+        #self.children = []  # not needed atm
+        self.delta = 0  # attribute that get's incremented every time a node is added further down this branch
 
 class Tree:
+    """
+    Class for a Rapidly Exploring Random Tree.
+    """
     
     def __init__(self, q):
         self.root = Node(q, None)
         self.nodes = [self.root]
 
     def add_node(self, q, parent = None):
+        """
+        Adds a new node with the config q and a parent node.
+        """
         if not parent:
             closest = self.nearest_neighbor(q)
         else:
             closest = parent
         new = Node(q, closest)
-        closest.children.append(new)
+        #closest.children.append(new)  # not needed atm
         self.nodes.append(new)
         tmp = new.parent
+        # increment delta values up the chain
         while tmp.parent is not None:
             tmp.delta += 1
             tmp = tmp.parent
         return new
 
     def nearest_neighbor(self, q, control):
+        """
+        Gets the node within the tree that is closest in Euclidean distance to configuration q and has delta smaller than control.
+        """
         min_dist = np.Inf
         closest = None
         for node in self.nodes:
@@ -46,13 +56,19 @@ class Tree:
         return closest
 
 def collision_fn(robot, joints, obj):
+    """
+    Wrapper function, returns a collision check for the given arguments.
+    Args:
+        - robot: Pybullet object id of the robot
+        - joints: list/array of Pybullet joint ids of the robot
+        - obj: Pybullet object id for which to check collision with robot
+    """
     def collision(q):
         currj = [pyb.getJointState(robot, i)[0] for i in joints]
         for joint, val in zip(joints, q):
             pyb.resetJointState(robot, joint, val)    
-        #pyb.addUserDebugPoints([pyb.getLinkState(robot, 7, computeForwardKinematics=True)[0]],[[0,0,1]], 3)
         pyb.performCollisionDetection()  # perform just the collision detection part of the PyBullet engine
-        col_env = True if pyb.getContactPoints(robot, obj) or pyb.getContactPoints(robot, 1) else False  # 1 will always be the ground plane
+        col_env = True if pyb.getContactPoints(robot, obj) or pyb.getContactPoints(robot, 0) else False  # 0 will always be the ground plane
         for joint, val in zip(joints, currj):
             pyb.resetJointState(robot, joint, val)
         #col_self = True if pyb.getContactPoints(robot, robot, 1, 7) else False
@@ -61,6 +77,14 @@ def collision_fn(robot, joints, obj):
     return collision
 
 def sample_fn(joints, lower, upper, collision):
+    """
+    Wrapper function, returns a uniform sampler for a configuration space defined by the arguments.
+    Args:
+        - joints: list/array of Pybullet joint ids of the robot
+        - lower: list/array of lower joint limits
+        - upper: list/array of upper joint limits
+        - collision: collision function as obtained by calling collision_fn
+    """
     def sample():
         sample = np.random.uniform(low=np.array(lower), high=np.array(upper), size=len(joints))
         while collision(sample):
@@ -69,17 +93,25 @@ def sample_fn(joints, lower, upper, collision):
     return sample
 
 def connect_fn(collision, epsilon = 1e-3):
+    """
+    Wrapper function, returns a connect function for a given collision function and step size epsilon.
+    Args:
+        - collision: collision function as obtained by calling collision_fn
+        - epsilon: step size in configuration space for collision checks when connecting two nodes
+    """
     def connect(tree, q, control):
         node_near = tree.nearest_neighbor(q, control)
         q_cur = node_near.q
         q_old = q_cur
+        # connect loop
         while True:   
-            dist = np.linalg.norm(q - q_cur)
+            diff = q - q_cur
+            dist = np.linalg.norm(diff)
             if epsilon > dist:
                 q_cur = q
             else:
                 q_old = q_cur
-                q_cur = q_cur + (epsilon/dist) * (q - q_cur)
+                q_cur = q_cur + (epsilon/dist) * diff
             if np.array_equal(q_cur,q):
                 return tree.add_node(q, node_near), 0
             col = collision(q_cur)
@@ -90,7 +122,19 @@ def connect_fn(collision, epsilon = 1e-3):
     return connect
 
 def bi_path(node1, node2, tree1, tree2, q_start):
+    """
+    For two RRtrees that have connected to the same configuration q_con, returns a path from start to finish.
+    Args:
+        - node1: node of q_con in tree1
+        - node2: node of q_con in tree2
+        - tree1: tree for node1
+        - tree2: tree for node2
+        - q_start: the starting configuration, used to determine which tree is the one starting at the starting node such that the path is given in correct order
+    Returns:
+        - list containing a path of collision-free configurations from start to goal
+    """
     
+    # find out which tree contains starting node
     if np.array_equal(tree1.root.q, q_start):
         nodeA = node1
         nodeB = node2
@@ -98,6 +142,7 @@ def bi_path(node1, node2, tree1, tree2, q_start):
         nodeA = node2
         nodeB = node1
 
+    # go from connection node to root for both trees
     tmp = nodeA
     a_traj = [nodeA.q]
     while tmp.parent != None:
@@ -112,6 +157,9 @@ def bi_path(node1, node2, tree1, tree2, q_start):
     return list(reversed(a_traj)) + b_traj
     
 def free_fn(collision):
+    """
+    Wrapper function, returns a function that checks if the path between two configurations is collision-free (basically the same thing as the connect method without any trees involved).
+    """
     
     def free(q_start, q_end, epsilon):
         tmp = q_start
@@ -151,15 +199,15 @@ def bi_rrt(q_start, q_final, goal_bias, robot, joints, obj, max_steps, epsilon, 
         - q_start: list/array of starting configuration for robot
         - q_final: list/array of goal configuration for robot
         - goal_bias: number between 0 and 1, determines the probability that the random sample of the algorithm is replaced with the goal configuration
-        - robot: Pybullet of the robot which the algorithm is running for
+        - robot: Pybullet id of the robot which the algorithm is running for
         - joints: list of Pybullet joint ids of the above robot
         - obj: Pybullet object id for which the collision check is performed
         - max_steps: cutoff for iterations of the algorithm before no solution will be returned
         - epsilon: config space step size for collision check
         - force_swap: number of times one of the two trees can stay swapped in before a swap will be forced
-        - smooth: determines if the result path will be smoothed, takes some time
+        - smooth: determines if the result path will be smoothed, takes some time, potentially even more than the initial search
     """
-    # start time for time output down below
+    # start time for running time output down below
     start = time()
 
     # init the two trees
@@ -272,6 +320,9 @@ def bi_rrt(q_start, q_final, goal_bias, robot, joints, obj, max_steps, epsilon, 
     return None
 
 def path(tree, end_node):
+    """
+    Path algorithm for single tree RRT.
+    """
     path = [end_node.q]
     tmp = end_node
     while tmp.parent is not None:
@@ -281,6 +332,9 @@ def path(tree, end_node):
     return list(reversed(path))
 
 def rrt(q_start, q_final, goal_bias, robot, joints, obj, max_steps, epsilon, smooth=False):
+    """
+    Single tree RRT, doesn't work nearly as well as the Bi-RRT above in this context for some reason.
+    """
     start = time()
     tree = Tree(q_start)
 
@@ -334,6 +388,11 @@ def rrt(q_start, q_final, goal_bias, robot, joints, obj, max_steps, epsilon, smo
     return None
 
 def interpolate_path(path):
+    """
+    Method that takes a path of configurations and interpolates between its elements,
+    resulting in the same trajectory but with more intermediate steps. The number of steps
+    between two configurations depends on their Euclidean distance in config space.
+    """
     ret = []
     scale_factors = []
     for idx in range(len(path)-1):

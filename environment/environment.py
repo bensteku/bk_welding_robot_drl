@@ -243,7 +243,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         Returns whether there is a collision anywhere between the robot and the specified object
         """
         pyb.performCollisionDetection()  # perform just the collision detection part of the PyBullet engine
-        return True if pyb.getContactPoints(self.robot, obj_id) else False
+        return True if pyb.getContactPoints(self.robot, obj_id) or pyb.getContactPoints(self.robot, 0) else False
 
     def config_is_in_collision(self, obj_id, config):
         """
@@ -254,7 +254,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         for joint, val in zip(self.joints, config):
             pyb.resetJointState(self.robot, joint, val)    
         pyb.performCollisionDetection()  # perform just the collision detection part of the PyBullet engine
-        col_env = True if pyb.getContactPoints(self.robot, obj_id) or pyb.getContactPoints(self.robot, 1) else False  # 1 will always be the ground plane
+        col_env = True if pyb.getContactPoints(self.robot, obj_id) or pyb.getContactPoints(self.robot, 0) else False  # 0 will always be the ground plane
         for joint, val in zip(self.joints, currj):
             pyb.resetJointState(self.robot, joint, val)
         pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
