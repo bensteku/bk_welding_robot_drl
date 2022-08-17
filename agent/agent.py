@@ -21,8 +21,8 @@ class Agent:
         self.state = 0  
 
         # goals: overall collection of weldseams that are left to be dealt with
-        # objective: the weldseam that is currently being dealt with
-        # plan: concrete collection of robot commands to achieve (the next part of) the objective
+        # plan: expansion of intermediate steps containted within one weldseam
+        # objective: the next part of the plan    
         self.goals = []
         self.objective = None
         self.plan = None
@@ -31,15 +31,21 @@ class Agent:
         self.env = None
 
     def next_state(self):
+        """
+        Method that iterates the state of the agent. Called from outside if certain goal conditions are fulfilled.
+        """
+
+        # if agent was in state 1 or 3 the objective is now succesfully completed
         if self.state == 1 or self.state == 3:
             self.objective = None
+        # increment state or wrap back around if in state 3
         self.state = self.state + 1 if self.state < 3 else 0
         return self.state
 
     def _set_env(self, senv: env.WeldingEnvironment):
         """
         Method for making known the env in which the agent is supposed to be working.
-        May replace later on by making the env a param in the constructor.
+        Is supposed to be called from the env constructor.
         """
 
         self.env = senv
@@ -55,7 +61,7 @@ class Agent:
     def _set_goals(self, index):
         """
         To be implemented in the subclasses.
-        Should extract the relevant weld frame data from dataset, transform it as appropriate and stack it in order into the goals array.
+        Should extract the relevant weld frame data from dataset, transform it as appropriate and stack it in its original order into the goals array.
         """
 
         raise NotImplementedError
@@ -66,26 +72,40 @@ class AgentPybullet(Agent):
     def __init__(self, asset_files_path):
         
         super().__init__(asset_files_path)
-        self.xyz_offset = np.array((0, 0, 0.01))  # offset in pybullet coordinates, location to place the objects into
+
+        # offset in pybullet coordinates, location to place the objects into
+        self.xyz_offset = np.array((0, 0, 0.01))  
+
+        # radius of the circle around the goal position for the robot base in which a full reward will be given
         self.base_pos_reward_thresh = 0.5
-        self.ee_pos_reward_thresh = 8e-2  # really TODO
+        # same as above, just for the end effector position
+        self.ee_pos_reward_thresh = 8e-2  # might need adjustment
+        # same as above, just for quaternion similarity (see util/util.py method)
         self.quat_sim_thresh = 4e-2  # this probably too
+
+        # pybullet id of the part the agent is currently dealing with
         self.current_part_id = None
 
-    def load_object_into_env(self, index):
+        # height at which the ee is transported when not welding
+        self.safe_height = 0.5
 
-        if self.env is None:
-            raise ValueError("env needs to be set before agent can act upon it!")
+    def load_object_into_env(self, index):
+        """
+        Method for loading an object into the simulation.
+        Args:
+            - index: index of the desired file in the dataset list
+        """
 
         self.current_pard_id = self.env.add_object(os.path.join(self.asset_files_path, self.dataset["filenames"][index]), 
                                                     pose = (self.xyz_offset, [0, 0, 0, 1]),
                                                     category = "fixed" )
         self._set_goals(index)
 
-    def get_state(self):
+    def _get_obs(self):
         """
-        Returns the state of the agent.
+        Returns the an observation of the agent (in reference to the env's observation).
         This consists of an observation of the environment and the agent's current objective.
+        Arranged in such a way that it's convenient for usage with PyTorch.
         """
         obs = self.env._get_obs()
         if self.objective:
@@ -97,6 +117,7 @@ class AgentPybullet(Agent):
     def _register_data(self):
         """
         Scans URDF(obj) files in asset path and creates a list, associating file name with weld seams and ground truths.
+        This can can later be used to load these objects into the simulation, see load_object_into_env method.
         """
 
         filenames = []
@@ -133,12 +154,19 @@ class AgentPybullet(Agent):
             self.goals.append(tmp)
 
     def is_done(self):
+        """
+        Indicates whether the agent is done with the current welding piece.
+        Determinde by whether the goal list is empty or not.
+        """
         if self.goals:
             return False
         else:
             return True
 
     def _set_plan(self):
+        """
+        Sets the plan by extracting all intermediate steps from the foremost element in the goals list.
+        """
         if self.goals:
             self.plan = []
             goal = self.goals.pop(0)
@@ -151,7 +179,7 @@ class AgentPybullet(Agent):
 
     def _set_objective(self):
         """
-        Method for translating elements of goal array into concrete instructions for actions
+        Gets the foremost step of the plan.
         """
         if self.plan:
             self.objective = self.plan.pop(0)
@@ -160,24 +188,37 @@ class AgentPybullet(Agent):
             return False
 
     def reward(self, obs=None, timeout=False):
+        """
+        Method for calculating the reward the agent gets for the state it's currently in.
+        Args:
+            - obs: env observation (not agent!)
+            - timeout: bool flag for when the movement of the last action timed out
+        Returns:
+            - reward as float number
+            - boolean indicating if the objectives for the current state have been fulfilled
+        """
         
-        # TODO: implement collision check
+        # bool flags for when the objective is achieved
         pos_done, rot_done, base_done = False, False, False
+        # base reward
         reward = 0
+
         if self.state == 0:
             # if the arm is in moving mode, give out rewards for moving towards the general region of the objective
-            # quadratic reward to create smooth gradient
+            # give full reward if a circular region around the xy-position of the next objective is reached
             distance = np.linalg.norm(self.objective[0][:2] - obs["base_position"])
             
             if distance < self.base_pos_reward_thresh:
                 reward += 10
                 base_done = True
             else:
-                reward += (-10.0/(9*self.base_pos_reward_thresh**2)) * distance ** 2 + 10  # quadratic function: 10 at threshold, 0 at 3*threshold
+                # exponential decay up to threshold
+                reward += util.exp_decay(distance, 10, 3*self.base_pos_reward_thresh)
         elif self.state == 3:
-            # move upwards
-            distance = np.linalg.norm(np.array([obs["position"][0], obs["position"][1], 0.5]) - obs["position"]) 
-            #reward += (-10.0/(9*self.base_pos_reward_thresh**2)) * distance ** 2 + 10
+            # state for moving the ee upwards after one line has been welded
+
+            # simply measure distance up to safe height
+            distance = np.linalg.norm(np.array([obs["position"][0], obs["position"][1], self.safe_height]) - obs["position"]) 
             if distance < self.ee_pos_reward_thresh:
                 reward += 10
                 pos_done = True
@@ -185,16 +226,15 @@ class AgentPybullet(Agent):
             else:
                 reward += util.exp_decay(distance, 10, 5*self.ee_pos_reward_thresh)
         else:
-            # if the arm is in welding mode give out a reward in concordance to how far away it is from the desired position and how closely
+            # if the arm is in welding mode or moving to the start position for welding give out a reward in concordance to how far away it is from the desired position and how closely
             # it matches the ground truth rotation
-            # if the robot is in an invalid state (as determined by a timeout in the movement method) give a negative reward
+            # if the robot is in a problematic configuration (collision or not reachable(timeout)) give out a negative reward
             distance = np.linalg.norm(self.objective[0] - obs["position"]) 
             
             if distance < self.ee_pos_reward_thresh:
                 reward += 20
                 pos_done = True  # objective achieved
             else:
-                #reward += (-20.0/(9*self.ee_pos_reward_thresh**2)) * distance ** 2 + 20  # quadratic function: 20 at threshold, 0 at 3*threshold
                 reward += util.exp_decay(distance, 20, 20*self.ee_pos_reward_thresh)
             
             quat_sim = util.quaternion_similarity(self.objective[2], obs["rotation"])    
@@ -204,11 +244,13 @@ class AgentPybullet(Agent):
             print(distance, self.ee_pos_reward_thresh)
             print(quat_sim, 1-self.quat_sim_thresh)
             
-            reward = reward * (quat_sim**0.5)
+            reward = reward * (quat_sim**0.5)  # take root of quaternion similarity to dampen its effect a bit
+        
+        # hand out penalties
         if timeout:
-            reward -= 75
-        if self.env.is_in_collision(self.current_pard_id) and not (pos_done and rot_done):
-            reward -= 150
+            reward -= 20
+        if self.env.is_in_collision(self.current_pard_id): #and not (pos_done and rot_done):
+            reward -= 50
             pos_done = False
             rot_done = False
 
@@ -218,17 +260,19 @@ class AgentPybullet(Agent):
         return reward, pos_done and rot_done or base_done
         
 class AgentPybulletNN(AgentPybullet):
+    """
+    Pybullet agent that is driven by neural net implemented in PyTorch.
+    """
     
     def __init__(self, asset_files_path):
         super().__init__(asset_files_path)
         self.model = AgentModelSimple()
 
-    def act(self, state):
+    def act(self, agent_obs):
         """
         Act function for this agent. Parameters are slightly different: instead of a gym obs (OrderedDict) it takes a Pytorch tensor
-        which contains the gym information + information about the agents current goals (to differentiate between the two, it's called a state instead of obs)
+        which contains the gym information + information about the agents current goals (to differentiate between the two, it's called a agent_obs instead of obs)
         """
-
         
         if not self.plan and not self.objective:  # only create new plan if there's also no current objective
             self._set_plan()
@@ -239,7 +283,7 @@ class AgentPybulletNN(AgentPybullet):
         self.env.switch_tool(tool)
 
         ## call neural net for action TODO
-        action_tensor = self.model.choose_action(state)
+        action_tensor = self.model.choose_action(agent_obs)
         action_array = action_tensor.cpu().detach().numpy()
         action = OrderedDict()
         action["translate_base"] = action_array[:2]
@@ -253,6 +297,14 @@ class AgentPybulletNN(AgentPybullet):
         return action
 
 class AgentPybulletRRTPlanner(AgentPybullet):
+    """
+    Agent that acts based on an explicit algorithm:
+    - always moves base towards next objective
+    - uses RRT with ground truth to get trajectory to starting position
+    - interpolates linearly between starting and finishing position while welding
+    - again uses RRT to move ee back up to safe height after finishing welding
+    It uses actions that are expressed in joint states and must therefore use the env subclass dedicated to that.
+    """
 
     def __init__(self, asset_files_path):
         super().__init__(asset_files_path)

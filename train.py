@@ -30,7 +30,7 @@ episode_durations = []
 for i_episode in range(num_episodes):
     env.reset()
     agent.load_object_into_env(index)
-    state_old = agent.get_state()
+    state_old = agent._get_obs()
     
     for t in count():
 
@@ -40,7 +40,7 @@ for i_episode in range(num_episodes):
         _, reward, done, _ = env.step(action)
 
         if not done:
-            state_new = agent.get_state()
+            state_new = agent._get_obs()
         else:
             state_new = None
 
