@@ -55,25 +55,47 @@ class Tree:
                 closest = node
         return closest
 
-def collision_fn(robot, joints, obj):
+def collision_fn(robot, joints, objs, ee, pos_start, pos_goal, thresh):
     """
     Wrapper function, returns a collision check for the given arguments.
+    Additionally, the function will ignore collision if the current configuration is close enough to
+    either goal or start configuration in cartesian space as determined by a threshold.
+    This serves to make it so that the algorithm will be able to deal with start/goal configurations
+    that are placed inside a mesh.
     Args:
         - robot: Pybullet object id of the robot
         - joints: list/array of Pybullet joint ids of the robot
         - obj: Pybullet object id for which to check collision with robot
+        - ee: Pybullet link id of the end effector of the robot
+        - pos_start: Cartesian position of the start configuration
+        - pos_goal: Same for the goal configuration
+        - thresh: threshold distance for ignoring the collision check around start and goal position
     """
     def collision(q):
         currj = [pyb.getJointState(robot, i)[0] for i in joints]
         for joint, val in zip(joints, q):
             pyb.resetJointState(robot, joint, val)    
+        # if the q is within the vicinity of the goal or start configurations in cartesian space, skip collision detection
+        # so that weld seams that are positioned inside a mesh can be dealt with
+        
+        cartesian_pos = np.array(pyb.getLinkState(
+                            bodyUniqueId=robot,
+                            linkIndex=ee,
+                            computeForwardKinematics=True  # need to check if this is necessary, if not can be turned off for performance gain
+            )[0])
+        if np.linalg.norm(cartesian_pos - pos_start) < thresh or np.linalg.norm(cartesian_pos - pos_goal) < thresh:
+            return False
+        
         pyb.performCollisionDetection()  # perform just the collision detection part of the PyBullet engine
-        col_env = True if pyb.getContactPoints(robot, obj) or pyb.getContactPoints(robot, 0) else False  # 0 will always be the ground plane
+        col = False
+        for obj in objs:
+            if pyb.getContactPoints(robot, obj):
+                col = True
         for joint, val in zip(joints, currj):
             pyb.resetJointState(robot, joint, val)
         #col_self = True if pyb.getContactPoints(robot, robot, 1, 7) else False
         
-        return col_env #and col_self
+        return col #and col_self
     return collision
 
 def sample_fn(joints, lower, upper, collision):
@@ -116,7 +138,7 @@ def connect_fn(collision, epsilon = 1e-3):
                 return tree.add_node(q, node_near), 0
             col = collision(q_cur)
             if col and np.array_equal(q_old, node_near.q):
-                return None, 2  
+                return node_near, 2  
             elif col and not np.array_equal(q_old, node_near.q):
                 return tree.add_node(q_old, node_near), 1
     return connect
@@ -192,7 +214,7 @@ def smooth_path(path, epsilon, free):
 
     return path_smooth
 
-def bi_rrt(q_start, q_final, goal_bias, robot, joints, obj, max_steps, epsilon, force_swap=100, smooth=True):
+def bi_rrt(q_start, q_final, goal_bias, robot, joints, objs, max_steps, epsilon, ee, pos_start, pos_goal, thresh, force_swap=100, smooth=True):
     """
     Performs RRT algorithm with two trees that are swapped out if certain conditions apply.
     Params:
@@ -201,9 +223,13 @@ def bi_rrt(q_start, q_final, goal_bias, robot, joints, obj, max_steps, epsilon, 
         - goal_bias: number between 0 and 1, determines the probability that the random sample of the algorithm is replaced with the goal configuration
         - robot: Pybullet id of the robot which the algorithm is running for
         - joints: list of Pybullet joint ids of the above robot
-        - obj: Pybullet object id for which the collision check is performed
+        - objs: Pybullet object ids for which the collision check is performed
         - max_steps: cutoff for iterations of the algorithm before no solution will be returned
         - epsilon: config space step size for collision check
+        - ee: Pybullet link id of end effector of the robot, needed for collision
+        - pos_start: Cartesian position of q_start, needed for collision
+        - pos_goal: Cartesian position of q_goal, needed for collision
+        - thresh: radius around pos_start/goal in which collision will be ignored
         - force_swap: number of times one of the two trees can stay swapped in before a swap will be forced
         - smooth: determines if the result path will be smoothed, takes some time, potentially even more than the initial search
     """
@@ -225,16 +251,21 @@ def bi_rrt(q_start, q_final, goal_bias, robot, joints, obj, max_steps, epsilon, 
     collisionA, triesA, ratioA = 0., 0., 1
     collisionB, triesB, ratioB = 0., 0., 1
 
+    # free run, number of times after a force swap of trees that the swap condition will be ignored
+    free_runs = 50
+    free_run = 0
+    force_swap_active = False
+
+    # variables for anchorpoint sampling
+    anchorpoint = np.zeros(len(q_start))
+    scale = 1
+
     # stop Pybullet rendering to save performance
     pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)
     # get collision function for our robot and obstacle
-    collision = collision_fn(robot, joints, obj)
+    collision = collision_fn(robot, joints, objs, ee, pos_start, pos_goal, thresh)
 
-    # check if either start or finish is in collision
-    if collision(q_final):
-        raise ValueError("Goal configuration is in collision in work space!")
-    elif collision(q_start):
-        raise ValueError("Starting configuration is in collision in work space!")
+    # get the free space function for smoothing if needed
     if smooth:
         free = free_fn(collision)
     
@@ -254,7 +285,7 @@ def bi_rrt(q_start, q_final, goal_bias, robot, joints, obj, max_steps, epsilon, 
         random = np.random.random()
         if random > goal_bias:
             # get random configuration
-            q_rand = sample()
+            q_rand = sample() * scale + anchorpoint
             if np.linalg.norm(q_rand - treeB.root.q) > rA:
                 # resample if it's not in the allowable radius
                 continue 
@@ -267,6 +298,18 @@ def bi_rrt(q_start, q_final, goal_bias, robot, joints, obj, max_steps, epsilon, 
         reached_nodeA, status = connect(treeA, q_rand, controlA)
         # increment connect tries
         triesA += 1.
+
+        # anchorpoint sampling handling
+        if status == 1 or status == 2:
+            # connection unsuccesful, reduce sampling radius and use last node before collision as anchorpoint
+            scale = max(0.05, scale - 0.05)
+            anchorpoint = reached_nodeA.q
+        if status == 0:
+            # connection succesful, reset anchorpoint and sampling radius
+            scale = 1
+            anchorpoint = np.zeros(len(q_start))
+
+        
         if status == 2:  # case: hit an obstacle in one epsilon after nearest neighbor
             # increment direct collisions
             collisionA += 1.
@@ -303,14 +346,22 @@ def bi_rrt(q_start, q_final, goal_bias, robot, joints, obj, max_steps, epsilon, 
         # calculate ratio of collisions to succesful connects
         ratioA = collisionA / triesA
         ratioB = 1 if triesB == 0 else collisionB / triesB
+        if force_swap_active:
+            free_run += 1
         # the tree with the higher ratio stays in, such that more samples to go the tree that is near obstacles
-        if ratioB > ratioA or i%force_swap==0:
+        if (ratioB > ratioA and free_run > free_runs) or i%force_swap==0:
+            free_run = 0
+            force_swap_active = False
+            if i%force_swap==0:
+                force_swap_active = True
             treeA, treeB = treeB, treeA
             collisionA, collisionB = collisionB, collisionA
             triesA, triesB = triesB, triesA
             ratioA, ratioB = ratioB, ratioA
             rA, rB = rB, rA
             controlA, controlB = controlB, controlA
+            anchorpoint = np.zeros(len(q_start))
+            scale = 1
         if i % 250 == 0:
             print(str(i+1) + " Steps")
             print("Current Tree has "+str(len(treeA.nodes))+" nodes.")

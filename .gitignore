@@ -7,3 +7,4 @@
 *.dae
 *pycache*
 todo.md
+*.dat

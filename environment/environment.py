@@ -43,12 +43,11 @@ class WeldingEnvironment(gym.Env):
         
         obs = self._get_obs()
 
-        reward, info = self.agent.reward(obs, timeout) if action is not None else (0, False)
-        if info:
+        reward, success, done = self.agent.reward(obs, timeout) if action is not None else (0, False, False)
+        if success:
             self.agent.next_state()
-        done = self.agent.is_done()
 
-        return obs, reward, done, info
+        return obs, reward, done, success
 
     def close(self):
 
@@ -98,7 +97,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         super().__init__(agent, relative_movement)
 
         self.asset_files_path = asset_files_path
-        self.obj_ids = {'fixed': [], 'rigid': []}  # dict of objects by type of body dynamics
+        self.obj_ids = []  # list of object ids
         self.tool = 0  # 1: TAND GERAD, 0: MRW510
         if robot in ["ur5","kr6","kr16"]:
             self.robot_name = robot
@@ -125,7 +124,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
 
     def reset(self):
 
-        self.obj_ids = { 'fixed': [], 'rigid': [] }
+        self.obj_ids = []
         pyb.resetSimulation(pyb.RESET_USE_DEFORMABLE_WORLD)
         pyb.setGravity(0, 0, -9.8)
 
@@ -133,7 +132,8 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)
 
         # load ground plane to hold objects in place
-        pyb.loadURDF("workspace/plane.urdf", basePosition=[0, 0, -0.001])
+        plane_id = pyb.loadURDF("workspace/plane.urdf", basePosition=[0, 0, -0.001])
+        self.obj_ids.append(plane_id)
 
         # TODO: load in welding table
 
@@ -238,27 +238,31 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
 
             return True
 
-    def is_in_collision(self, obj_id):
+    def is_in_collision(self):
         """
         Returns whether there is a collision anywhere between the robot and the specified object
         """
         pyb.performCollisionDetection()  # perform just the collision detection part of the PyBullet engine
-        return True if pyb.getContactPoints(self.robot, obj_id) or pyb.getContactPoints(self.robot, 0) else False
+        col = False
+        for obj in self.obj_ids:
+            if len(pyb.getContactPoints(self.robot, obj)) > 0:
+                col = True 
+                break
+        return col
 
-    def config_is_in_collision(self, obj_id, config):
+    def config_is_in_collision(self, config):
         """
-        Returns whether there is a collision anywhere between the robot and the specified object if the robot is in the specified configuration
+        Returns whether there is a collision anywhere if the robot is in the specified configuration
         """
         pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)
         currj = [pyb.getJointState(self.robot, i)[0] for i in self.joints]
         for joint, val in zip(self.joints, config):
             pyb.resetJointState(self.robot, joint, val)    
-        pyb.performCollisionDetection()  # perform just the collision detection part of the PyBullet engine
-        col_env = True if pyb.getContactPoints(self.robot, obj_id) or pyb.getContactPoints(self.robot, 0) else False  # 0 will always be the ground plane
+        col = self.is_in_collision()
         for joint, val in zip(self.joints, currj):
             pyb.resetJointState(self.robot, joint, val)
         pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
-        return col_env
+        return col
 
 
     def _perform_action(self, action):
@@ -375,22 +379,20 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         """
 
         v = [np.linalg.norm(pyb.getBaseVelocity(i)[0])
-            for i in self.obj_ids['rigid']]
+            for i in self.obj_ids]
         return all(np.array(v) < 5e-3)
 
-    def add_object(self, urdf, pose, category='rigid'):
+    def add_object(self, urdf, pose):
         """
-        List of (fixed, rigid, or deformable) objects in env.
+        Add objects to env.
         """
-
-        fixed_base = 1 if category == 'fixed' else 0
         pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)
         obj_id = pyb.loadURDF(
             urdf,
             pose[0],  # xyz
             pose[1],  # xyzw quaternion
-            useFixedBase=fixed_base)
-        self.obj_ids[category].append(obj_id)
+            useFixedBase=True)
+        self.obj_ids.append(obj_id)
         pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
         return obj_id
 
@@ -636,7 +638,7 @@ class WeldingEnvironmentPybulletConfigSpace(WeldingEnvironmentPybullet):
             'joints': self.get_joint_state()
         }  
 
-    def movej(self, targj, speed=0.05, timeout=0.025, use_dynamics=True):
+    def movej(self, targj, speed=0.05, timeout=0.025, use_dynamics=False):
         
         if use_dynamics:
             super().movej(targj, speed, timeout)
@@ -644,16 +646,18 @@ class WeldingEnvironmentPybulletConfigSpace(WeldingEnvironmentPybullet):
             currj = [pyb.getJointState(self.robot, i)[0] for i in self.joints]
             currj = np.array(currj)
             diffj = targj - currj
-            while all(np.abs(diffj) > 1e-2):
+            while any(np.abs(diffj) > 1e-2):
                 # Move with constant velocity
                 norm = np.linalg.norm(diffj)
-                v = diffj / norm if norm > 0 else 0
-                stepj = currj + v * speed
+                if norm > speed:
+                    v = diffj / norm
+                    stepj = currj + v * speed
+                else:
+                    stepj = currj + diffj
                 self.set_joint_state(stepj)
                 pyb.stepSimulation()
 
-                currj = [pyb.getJointState(self.robot, i)[0] for i in self.joints]
-                currj = np.array(currj)
+                currj = stepj
                 diffj = targj - currj
             return False
 

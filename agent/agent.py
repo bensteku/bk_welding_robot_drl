@@ -35,11 +35,18 @@ class Agent:
         Method that iterates the state of the agent. Called from outside if certain goal conditions are fulfilled.
         """
 
-        # if agent was in state 1 or 3 the objective is now succesfully completed
-        if self.state == 1 or self.state == 3:
+        # if agent is in state 1 or 2 an objective has been completed
+        if self.state == 1 or self.state == 2:
             self.objective = None
-        # increment state or wrap back around if in state 3
-        self.state = self.state + 1 if self.state < 3 else 0
+        # if the agent is in state 2 and the plan is not empty yet, that means is should remain in state 2
+        # because it has more linear welding steps to complete
+        if self.state == 2 and len(self.plan) != 0:
+            return self.state
+        else:
+            # otherwise it's in another state or it's in state 2 but there's currently no more welding to be done,
+            # then increment state or wrap back around if in state 3
+            self.state = self.state + 1 if self.state < 3 else 0
+
         return self.state
 
     def _set_env(self, senv: env.WeldingEnvironment):
@@ -77,7 +84,7 @@ class AgentPybullet(Agent):
         self.xyz_offset = np.array((0, 0, 0.01))  
 
         # radius of the circle around the goal position for the robot base in which a full reward will be given
-        self.base_pos_reward_thresh = 0.5
+        self.base_pos_reward_thresh = 1e-1
         # same as above, just for the end effector position
         self.ee_pos_reward_thresh = 8e-2  # might need adjustment
         # same as above, just for quaternion similarity (see util/util.py method)
@@ -97,8 +104,7 @@ class AgentPybullet(Agent):
         """
 
         self.current_pard_id = self.env.add_object(os.path.join(self.asset_files_path, self.dataset["filenames"][index]), 
-                                                    pose = (self.xyz_offset, [0, 0, 0, 1]),
-                                                    category = "fixed" )
+                                                    pose = (self.xyz_offset, [0, 0, 0, 1]))
         self._set_goals(index)
 
     def _get_obs(self):
@@ -153,16 +159,6 @@ class AgentPybullet(Agent):
             tmp["tool"] = 1 if frame["torch"][3] == "TAND_GERAD_DD" else 0           
             self.goals.append(tmp)
 
-    def is_done(self):
-        """
-        Indicates whether the agent is done with the current welding piece.
-        Determinde by whether the goal list is empty or not.
-        """
-        if self.goals:
-            return False
-        else:
-            return True
-
     def _set_plan(self):
         """
         Sets the plan by extracting all intermediate steps from the foremost element in the goals list.
@@ -170,8 +166,9 @@ class AgentPybullet(Agent):
         if self.goals:
             self.plan = []
             goal = self.goals.pop(0)
+            target_pos_bas = np.average(goal["weldseams"], axis=0)[:2]
             for idx in range(len(goal["weldseams"])):
-                tpl = (goal["weldseams"][idx], goal["norm"][idx], goal["target_rot"][idx], goal["tool"])
+                tpl = (goal["weldseams"][idx], goal["norm"][idx], goal["target_rot"][idx], goal["tool"], target_pos_bas)
                 self.plan.append(tpl)
             return True
         else:
@@ -206,7 +203,7 @@ class AgentPybullet(Agent):
         if self.state == 0:
             # if the arm is in moving mode, give out rewards for moving towards the general region of the objective
             # give full reward if a circular region around the xy-position of the next objective is reached
-            distance = np.linalg.norm(self.objective[0][:2] - obs["base_position"])
+            distance = np.linalg.norm(self.objective[4] - obs["base_position"])
             
             if distance < self.base_pos_reward_thresh:
                 reward += 10
@@ -229,27 +226,26 @@ class AgentPybullet(Agent):
             # if the arm is in welding mode or moving to the start position for welding give out a reward in concordance to how far away it is from the desired position and how closely
             # it matches the ground truth rotation
             # if the robot is in a problematic configuration (collision or not reachable(timeout)) give out a negative reward
-            distance = np.linalg.norm(self.objective[0] - obs["position"]) 
+            objective_with_slight_offset = self.objective[0] + self.objective[1][0] * 0.025 + self.objective[1][1] * 0.025
+            distance = np.linalg.norm(objective_with_slight_offset - obs["position"]) 
             
             if distance < self.ee_pos_reward_thresh:
                 reward += 20
                 pos_done = True  # objective achieved
             else:
                 reward += util.exp_decay(distance, 20, 20*self.ee_pos_reward_thresh)
-            
+
             quat_sim = util.quaternion_similarity(self.objective[2], obs["rotation"])    
             if quat_sim > 1-self.quat_sim_thresh:
                 rot_done = True
-
-            print(distance, self.ee_pos_reward_thresh)
-            print(quat_sim, 1-self.quat_sim_thresh)
             
             reward = reward * (quat_sim**0.5)  # take root of quaternion similarity to dampen its effect a bit
         
         # hand out penalties
         if timeout:
             reward -= 20
-        if self.env.is_in_collision(self.current_pard_id): #and not (pos_done and rot_done):
+        col = self.env.is_in_collision()
+        if col and not (pos_done and rot_done):
             reward -= 50
             pos_done = False
             rot_done = False
@@ -257,7 +253,10 @@ class AgentPybullet(Agent):
         if pos_done and rot_done:
             self.objective = None
 
-        return reward, pos_done and rot_done or base_done
+        success = (pos_done and rot_done or base_done) and not col
+        done = (self.objective is None and len(self.plan)==0 and len(self.goals)==0) or col
+
+        return reward, success, done
         
 class AgentPybulletNN(AgentPybullet):
     """
@@ -312,19 +311,26 @@ class AgentPybulletRRTPlanner(AgentPybullet):
 
     def act(self, obs):
 
-        if not self.plan and not self.objective:  # only create new plan if there's also no current objective
+        if not self.plan and not self.objective and self.state != 3:  # only create new plan if there's also no current objective
             self._set_plan()
-        if not self.objective:
+        if not self.objective and self.state != 3:
             self._set_objective()
+            tool = self.objective[3]
+            self.env.switch_tool(tool)
+        
+        print("objective")
+        print(self.objective)
+        print("plan")
+        print(self.plan)
 
         action = OrderedDict()
         action["translate_base"] = np.array([0, 0])
         action["joints"] = obs["joints"]
         #action["translate"] = np.array([0, 0, 0])
-        #action["rotate"] = np.array([0, 0, 0, 1])
+        #action["rotate"] = np.array([0, 0, 0, 1]) 
 
         if self.state == 0:
-            diff = self.objective[0][:2] - obs["base_position"]
+            diff = self.objective[4] - obs["base_position"]
             dist = np.linalg.norm(diff)
             if dist < self.env.base_speed:
                 action["translate_base"] = diff
@@ -335,9 +341,12 @@ class AgentPybulletRRTPlanner(AgentPybullet):
                 #action["translate"] = np.array([diff[0], diff[1], 0.5 - obs["position"][2]])
         elif self.state == 1:
             if not self.trajectory:
+                objective_with_slight_offset = self.objective[0] + self.objective[1][0] * 0.025 + self.objective[1][1] * 0.025  # target position + a small part of the face norms of the weld seam
                 q_cur = self.env.get_joint_state()
-                q_goal = self.env.solve_ik((self.objective[0] + self.objective[1][0] * 0.025 + self.objective[1][1] * 0.025, self.env._quat_w_to_ee(self.objective[2])))
-                traj_raw = planner.bi_rrt(q_cur, q_goal, 0.15, self.env.robot, self.env.joints, self.env.obj_ids["fixed"][0], 500000, 5e-4, 300)
+                q_goal = self.env.solve_ik((objective_with_slight_offset, self.env._quat_w_to_ee(self.objective[2])))
+                # the following line is needed because the configuration returned by inverse kinematics is often larger than 5e-3 away from the objective in cartesian space
+                pos_goal_from_q_goal = self.env.solve_fk(q_goal)[0]
+                traj_raw = planner.bi_rrt(q_cur, q_goal, 0.35, self.env.robot, self.env.joints, self.env.obj_ids, 500000, 1e-3, self.env.end_effector_link_id[self.env.robot_name], obs["position"], pos_goal_from_q_goal, 15e-3, 300)
                 self.trajectory = planner.interpolate_path(traj_raw)
             next_q = self.trajectory.pop(0)
             #pos, quat = self.env.solve_fk(next_q)
@@ -361,7 +370,9 @@ class AgentPybulletRRTPlanner(AgentPybullet):
                 goal_pos = diff + obs["position"][:2]
                 goal_pos = np.array([goal_pos[0], goal_pos[1], 0.5])
                 q_goal = self.env.solve_ik((goal_pos, self.env._quat_w_to_ee(np.array([0, 0, 0, 1]))))
-                traj_raw = planner.bi_rrt(q_cur, q_goal, 0.15, self.env.robot, self.env.joints, self.env.obj_ids["fixed"][0], 500000, 1e-3, 300)
+                # the following line is needed because the configuration returned by inverse kinematics is often larger than 5e-3 away from the objective in cartesian space
+                pos_goal_from_q_goal = self.env.solve_fk(q_goal)[0]
+                traj_raw = planner.bi_rrt(q_cur, q_goal, 0.35, self.env.robot, self.env.joints, self.env.obj_ids, 500000, 1e-3, self.env.end_effector_link_id[self.env.robot_name], obs["position"], pos_goal_from_q_goal, 15e-3, 300)
                 self.trajectory = planner.interpolate_path(traj_raw)
             next_q = self.trajectory.pop(0)
             #pos, quat = self.env.solve_fk(next_q)

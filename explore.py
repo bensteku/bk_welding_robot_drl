@@ -12,7 +12,12 @@ a.load_object_into_env(index)
 obs = e._get_obs()
 done = False
 
-while not done:
+a.goals = a.goals[18:]
+
+#e.switch_tool(1)
+#input("dodo")
+
+while not False:
     act = a.act(obs)
     #print(e._get_obs())
     #print("action")
@@ -20,14 +25,14 @@ while not done:
     print("agent state")
     print(a.state)
     print("objective")
-    print(a.objective[0])
+    print(a.objective)
     #if a.trajectory:
     #    for i in a.trajectory:
     #        e.movej(i)
-    obs, reward, done, info = e.step(act)
+    obs, reward, done, success = e.step(act)
     print("obs")
     print(obs["position"], obs["rotation"])
-    if info:
+    if success:
         a.trajectory = []
     print("reward")
     print(reward)

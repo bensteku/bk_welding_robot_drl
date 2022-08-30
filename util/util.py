@@ -136,7 +136,7 @@ def quaternion_similarity(quat1, quat2):
     """
     Measure of similarity between two quaternions via the angle distance between the two
     """
-    return 1 - np.arccos(2 * np.dot(quat1, quat2)**2 - 1)/np.pi
+    return 1 - np.arccos(np.clip(2 * np.dot(quat1, quat2)**2 - 1, -1, 1))/np.pi
 
 def quaternion_apx_eq(quat1, quat2, thresh=5e-2):
     return  quaternion_similarity(quat1, quat2) < thresh
