@@ -6,7 +6,7 @@ from model.model import AgentModelSimple, ReplayMemory
 import numpy as np
 
 agent = AgentPybulletNN("./assets/objects/")
-env = WeldingEnvironmentPybullet(agent, "./assets/", True, robot="kr16", relative_movement=True)
+env = WeldingEnvironmentPybullet(agent, "./assets/", True, robot="kr16")
 
 def dict_flatten(dict, tensor=True):
     res = np.array([])
@@ -22,8 +22,8 @@ index = agent.dataset["filenames"].index("201910204483_R1.urdf")
 memory = ReplayMemory(10000)
 
 num_episodes = 50
-batch_size = 128
-cutoff = batch_size * 300
+batch_size = 20
+cutoff = batch_size * 2
 target_update = 5
 episode_durations = []
 
@@ -34,6 +34,7 @@ for i_episode in range(num_episodes):
     
     for t in count():
 
+        # TODO: rewrite the action env interaction to directly take tensors/arrays instead of ordered dicts to avoid the spaghetti code below
         action = agent.act(torch.from_numpy(state_old).to(agent.model.device))
         action_tensor = dict_flatten(action)
 
@@ -45,6 +46,7 @@ for i_episode in range(num_episodes):
             state_new = None
 
         memory.push(state_old, dict_flatten(action, False), state_new, reward)
+        print(reward)
 
         state_old = state_new
 

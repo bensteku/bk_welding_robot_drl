@@ -50,39 +50,24 @@ class AgentModelSimple(AgentModel):
 
         self.action_scale_factor = 0.001
 
-        sizes = [126, 126]
-        self.actor = ActorNet(18,9, sizes).to(self.device)
-        self.critic = CriticNet(18 + 9, sizes).to(self.device)
+        sizes = [12, 12]
+        # input size: 2 for base position, 3 for ee position, 3 for ee rpy, 6 for joint state, 3 for objective position, 3 for norm1, 3 for norm2, 1 for agent state = 23 inputs
+        # output size: 2 for base movement, 3 for ee movement, 3 for ee rpy change = 8 outputs
+        self.actor = ActorNet(24, 8, sizes).to(self.device)
+        # input size: 24 for state description, 8 for the action taken  = 31 inputs
+        self.critic = CriticNet(24 + 8, sizes).to(self.device)
 
-        self.t_actor = ActorNet(18,9, sizes).to(self.device)
-        self.t_critic = CriticNet(18 + 9, sizes).to(self.device)
+        self.t_actor = ActorNet(24, 8, sizes).to(self.device)
+        self.t_critic = CriticNet(24 + 8, sizes).to(self.device)
 
         self.optimizations = 0
         self.training = True
-
-        # incremental rotations around the axes by 1 degree
-        self.discrete_rotations = [
-            [
-                np.array([ -0.0087265, 0, 0, 0.9999619 ]),
-                np.array([ 0.0087265, 0, 0, 0.9999619 ])
-            ],
-            [
-                np.array([ 0, -0.0087265, 0, 0.9999619 ]),
-                np.array([ 0, 0.0087265, 0, 0.9999619 ])
-            ],
-            [
-                np.array([ 0, 0, -0.0087265, 0.9999619 ]),
-                np.array([ 0, 0, 0.0087265, 0.9999619 ]),
-            ]
-        ]
 
     def choose_action(self, state):
         self.actor.eval()
         input_tensor = state.to(self.device)
 
-        mu, sigma = self.actor(input_tensor.double())
-
-        return self._actor_transform_output(mu, sigma)
+        return self.actor(input_tensor.double())
 
     def optimize(self, batch_size, memory, gamma):
 
@@ -96,8 +81,7 @@ class AgentModelSimple(AgentModel):
         actions = torch.tensor(actions).to(self.device)
         new_states = torch.tensor(new_states).to(self.device)
 
-        mu, sigma = self.t_actor(new_states)
-        target_actions = self._actor_transform_output(mu, sigma)
+        target_actions = self.t_actor(new_states)
         target_q_values = self.t_critic(new_states, target_actions)
         q_values = self.critic(states, actions)
 
@@ -116,8 +100,7 @@ class AgentModelSimple(AgentModel):
 
         self.critic.eval()
         self.actor.optimizer.zero_grad()
-        mu, sigma = self.actor.forward(states)
-        actions = self._actor_transform_output(mu, sigma)
+        actions = self.actor.forward(states)
         self.actor.train()
         actor_loss = -self.critic.forward(states, actions)
         actor_loss = torch.mean(actor_loss)
@@ -126,15 +109,7 @@ class AgentModelSimple(AgentModel):
 
         self.soft_update()
 
-    def _actor_transform_output(self, mu, sigma):
-        draw = torch.normal(mu, sigma)
-
-        draw[-4:] = draw[-4:].clone() / torch.norm(draw[-4:].clone())  # create unit quaternion
-        draw[:-4] = draw[:-4].clone() * self.action_scale_factor  # scale the translation by the scale factor
-
-        return draw
-
-    def soft_update(self, tau = 0.001):
+    def soft_update(self, tau = 0.5):
         actor_params = self.actor.named_parameters()
         critic_params = self.critic.named_parameters()
         t_actor_params = self.t_actor.named_parameters()
@@ -157,17 +132,20 @@ class AgentModelSimple(AgentModel):
 class ReplayMemory(object):
 
     def __init__(self, capacity):
-        self.states = np.zeros((capacity, 18))
-        self.new_states = np.zeros((capacity, 18))
-        self.actions = np.zeros((capacity, 9))
+        self.states = np.zeros((capacity, 24))
+        self.new_states = np.zeros((capacity, 24))
+        self.actions = np.zeros((capacity, 8))
         self.rewards = np.zeros((capacity, 1))
 
         self.idx = 0
+        self.full = False
         self.capacity = capacity
 
     def push(self, state_old, action, state_new, reward):
         """Save a transition"""
         idx = self.idx % self.capacity
+        if self.idx != 0 and idx % self.capacity == 0:
+            self.full = True
         self.states[idx] = state_old
         self.new_states[idx] = state_new
         self.actions[idx] = action
@@ -186,4 +164,7 @@ class ReplayMemory(object):
         return states, actions, rewards, new_states
 
     def __len__(self):
-        return len(self.states)
+        if self.full:
+            return len(self.states)
+        else:
+            return self.idx

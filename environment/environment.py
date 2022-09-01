@@ -8,11 +8,9 @@ from collections import OrderedDict
 class WeldingEnvironment(gym.Env):
 
     def __init__(self, 
-                agent,
-                relative_movement=False):
+                agent):
         
         self._random_state = None
-        self._relative_movement = relative_movement
 
         # variables needed by Gym env subclasses, set by method to be implemented by subclasses
         self._init_gym_vars()
@@ -77,12 +75,10 @@ class WeldingEnvironmentMOSES(WeldingEnvironment):
 
     def __init__(self,
                 agent,
-                asset_files_path,
-                relative_movement=False
-                ):
+                asset_files_path):
 
         self.asset_files_path = asset_files_path
-        super().__init__(agent, relative_movement)
+        super().__init__(agent)
 
 class WeldingEnvironmentPybullet(WeldingEnvironment):
 
@@ -91,10 +87,9 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                 asset_files_path,
                 display=False,
                 hz=240,
-                robot="ur5",
-                relative_movement=False):
+                robot="ur5"):
 
-        super().__init__(agent, relative_movement)
+        super().__init__(agent)
 
         self.asset_files_path = asset_files_path
         self.obj_ids = []  # list of object ids
@@ -154,6 +149,8 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
 
         # turn on rendering again
         pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
+
+        self.agent.state = 0
         
         obs, _, _, _ = self.step()  # return an observation of the environment without any actions taken
 
@@ -174,7 +171,8 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         return {
             'position': np.array(tmp[0]),
             'base_position':np.array(tmp2[4][:2]),  # only xy position of baselink
-            'rotation': self._quat_ee_to_w(np.array(tmp[1]))  # the quaternion given by getLinkState is in ee frame, we transform it to world frame (because our target rotations are in world frame)
+            'rotation': self._quat_ee_to_w(np.array(tmp[1])),  # the quaternion given by getLinkState is in ee frame, we transform it to world frame (because our target rotations are in world frame)
+            'joints': self.get_joint_state()
         }  
 
     def close(self):
@@ -268,29 +266,22 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
     def _perform_action(self, action):
 
         if action is not None:
-            # if relative movement is enabled, action must be transformed into absolute movement needed for robot control...
             state = self._get_obs()
-            new_state = OrderedDict()
-            if self._relative_movement:
-                # unfortunately, the order of dict entries matters to the gym contains() method here
-                # if somehow the order of dict entries in the observation space OrderedDict changes, then the order of the next lines defining the entries of the new state needs to be switched as well
-                new_state["base_position"] = state["base_position"] + action["translate_base"]
-                new_state["position"] = state["position"] + action["translate"]
-                new_state["rotation"] = self._quat_w_to_ee(action["rotate"])         
-                
-            # ....otherwise use it as is
-            else:
-                new_state["base_position"] = action["translate_base"]
-                new_state["position"] = action["translate"]
-                new_state["rotation"] = self._quat_w_to_ee(action["rotate"])
-                if not self.observation_space.contains(new_state):
-                    return False  # if the new state is invalid, return false and do nothing
+            # unfortunately, the order of dict entries matters to the gym contains() method here
+            # if somehow the order of dict entries in the observation space OrderedDict changes, then the order of the next lines defining the entries of the new state needs to be switched as well
+            new_base_position = state["base_position"] + action["translate_base"]
+            new_ee_position = state["position"] + action["translate"]
+            current_rotation_as_rpy = pyb.getEulerFromQuaternion(state["rotation"])
+            new_rotation_as_rpy = np.array([entry + action["rotate"][idx] for idx, entry in enumerate(current_rotation_as_rpy)])
+            new_rotation_as_quaternion = pyb.getQuaternionFromEuler(new_rotation_as_rpy)
+            new_rotation_as_quaternion_in_correct_frame = self._quat_w_to_ee(new_rotation_as_quaternion)         
+            # TODO: reimplement the valid bounds check once the bounds have actually been settled on sometime in the future
 
             # first move the base of the robot...(but only if the new location is sufficiently different from the old one to prevent constant)
-            if np.linalg.norm(new_state["base_position"]-state["base_position"]) > 1e-4:
-                pyb.resetBasePositionAndOrientation(self.robot, np.append(new_state["base_position"], self.fixed_height[self.robot_name]), pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
+            if np.linalg.norm(new_base_position - state["base_position"]) > 1e-4:
+                pyb.resetBasePositionAndOrientation(self.robot, np.append(new_base_position, self.fixed_height[self.robot_name]), pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
             # ...then the joints
-            timeout = self.movep((new_state["position"], new_state["rotation"]))
+            timeout = self.movep((new_ee_position, new_rotation_as_quaternion_in_correct_frame))
             if timeout:
                 return timeout
         
@@ -298,32 +289,51 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             pyb.stepSimulation()
 
     # methods taken almost 1:1 from ravens code, need to add proper attribution later TODO
-    def movej(self, targj, speed=0.05, timeout=0.025):
+    def movej(self, targj, speed=0.05, timeout=0.025, use_dynamics=False):
         """
         Move UR5 to target joint configuration.
         """
-        t0 = time.time()
-        while (time.time() - t0) < timeout:
+        if use_dynamics:
+            t0 = time.time()
+            while (time.time() - t0) < timeout:
+                currj = [pyb.getJointState(self.robot, i)[0] for i in self.joints]
+                currj = np.array(currj)
+                diffj = targj - currj
+                if all(np.abs(diffj) < 1e-2):
+                    return False
+
+                # Move with constant velocity
+                norm = np.linalg.norm(diffj)
+                v = diffj / norm if norm > 0 else 0
+                stepj = currj + v * speed
+                gains = np.ones(len(self.joints))
+                pyb.setJointMotorControlArray(
+                    bodyIndex=self.robot,
+                    jointIndices=self.joints,
+                    controlMode=pyb.POSITION_CONTROL,
+                    targetPositions=stepj,
+                    positionGains=gains)
+                pyb.stepSimulation()
+            print(f'Warning: movej exceeded {timeout} second timeout. Skipping.')
+            return True 
+        else:
             currj = [pyb.getJointState(self.robot, i)[0] for i in self.joints]
             currj = np.array(currj)
             diffj = targj - currj
-            if all(np.abs(diffj) < 1e-2):
-                return False
+            while any(np.abs(diffj) > 1e-2):
+                # Move with constant velocity
+                norm = np.linalg.norm(diffj)
+                if norm > speed:
+                    v = diffj / norm
+                    stepj = currj + v * speed
+                else:
+                    stepj = currj + diffj
+                self.set_joint_state(stepj)
+                pyb.stepSimulation()
 
-            # Move with constant velocity
-            norm = np.linalg.norm(diffj)
-            v = diffj / norm if norm > 0 else 0
-            stepj = currj + v * speed
-            gains = np.ones(len(self.joints))
-            pyb.setJointMotorControlArray(
-                bodyIndex=self.robot,
-                jointIndices=self.joints,
-                controlMode=pyb.POSITION_CONTROL,
-                targetPositions=stepj,
-                positionGains=gains)
-            pyb.stepSimulation()
-        print(f'Warning: movej exceeded {timeout} second timeout. Skipping.')
-        return True 
+                currj = stepj
+                diffj = targj - currj
+            return False
 
     def movep(self, pose, speed=0.01):
         """
@@ -347,8 +357,8 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             upperLimits=self.joints_upper[self.robot_name],
             jointRanges=self.joints_range[self.robot_name],
             restPoses=np.float32(self.resting_pose_angles[self.robot_name]).tolist(),
-            maxNumIterations=500,
-            residualThreshold=1e-6)
+            maxNumIterations=55000,
+            residualThreshold=1e-9)
         joints = np.float32(joints)
         joints[2:] = (joints[2:] + np.pi) % (2 * np.pi) - np.pi
         return joints
@@ -504,7 +514,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         max_position = np.array([6., 6., 1.25])
         min_position_base = np.array([-0.2, -0.2]) 
         max_position_base = np.array([6., 6.])
-        min_rotation = np.array([-1, -1, -1, -1])
+        min_rotation = np.array([-1, -1, -1]) * np.pi * 2
         max_rotation = min_rotation * (-1)
         self.pos_speed = 0.01  # provisional
         self.base_speed = 10 * self.pos_speed
@@ -513,26 +523,24 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             {
                 'position': gym.spaces.Box(low=min_position, high=max_position, shape=(3,), dtype=np.float32),
                 'base_position': gym.spaces.Box(low=min_position_base, high=max_position_base, shape=(2,), dtype=np.float32),
-                'rotation': gym.spaces.Box(low=min_rotation, high=max_rotation, shape=(4,), dtype=np.float32)
+                'rotation': gym.spaces.Box(low=min_rotation, high=max_rotation, shape=(3,), dtype=np.float32)
             }
         )
         
-        # actions consist of translating and rotating the end effector
-        # if relative_movement is true, then actions consists of additional movements
+        # actions consist of marginal translations and rotations
         # if it is false, then they consist of positions to be reached
-        if self._relative_movement:
-            min_position = np.array([-self.pos_speed, -self.pos_speed, -self.pos_speed])  
-            max_position = min_position * -1
-            min_position_base = np.array([-self.base_speed, -self.base_speed]) 
-            max_position_base = min_position_base * -1
-            min_rotation = np.array([-0.001, -0.001, -0.001, -0.001])
-            max_rotation = np.array([0.001, 0.001, 0.001, 0.001])
+        min_position = np.array([-self.pos_speed, -self.pos_speed, -self.pos_speed])  
+        max_position = min_position * -1
+        min_position_base = np.array([-self.base_speed, -self.base_speed]) 
+        max_position_base = min_position_base * -1
+        min_rotation = np.array([-0.001, -0.001, -0.001])
+        max_rotation = np.array([0.001, 0.001, 0.001])
 
         self.action_space = gym.spaces.Dict(
             {
                 'translate': gym.spaces.Box(low=min_position, high=max_position, shape=(3,), dtype=np.float32),
                 'translate_base': gym.spaces.Box(low=min_position_base, high=max_position_base, shape=(2,), dtype=np.float32),
-                'rotate': gym.spaces.Box(low=min_rotation, high=max_rotation, shape=(4,), dtype=np.float32)
+                'rotate': gym.spaces.Box(low=min_rotation, high=max_rotation, shape=(3,), dtype=np.float32)
             }
         )
 
@@ -585,29 +593,18 @@ class WeldingEnvironmentPybulletConfigSpace(WeldingEnvironmentPybullet):
                 asset_files_path,
                 display=False,
                 hz=240,
-                robot="ur5",
-                relative_movement=False):
+                robot="ur5"):
 
-        super().__init__(agent, asset_files_path, display, hz, robot, relative_movement)
+        super().__init__(agent, asset_files_path, display, hz, robot)
 
     def _perform_action(self, action):
         if action is not None:
-            # if relative movement is enabled, action must be transformed into absolute movement needed for robot control...
             state = self._get_obs()
             new_state = OrderedDict()
-            if self._relative_movement:
-                # unfortunately, the order of dict entries matters to the gym contains() method here
-                # if somehow the order of dict entries in the observation space OrderedDict changes, then the order of the next lines defining the entries of the new state needs to be switched as well
-                new_state["base_position"] = state["base_position"] + action["translate_base"]
-                new_state["joints"] = action["joints"]        
-                
-            # ....otherwise use it as is
-            else:
-                new_state["base_position"] = action["translate_base"]
-                new_state["position"] = action["translate"]
-                new_state["rotation"] = self._quat_w_to_ee(action["rotate"])
-                if not self.observation_space.contains(new_state):
-                    return False  # if the new state is invalid, return false and do nothing
+            # unfortunately, the order of dict entries matters to the gym contains() method here
+            # if somehow the order of dict entries in the observation space OrderedDict changes, then the order of the next lines defining the entries of the new state needs to be switched as well
+            new_state["base_position"] = state["base_position"] + action["translate_base"]
+            new_state["joints"] = action["joints"]        
 
             # first move the base of the robot...(but only if the new location is sufficiently different from the old one to prevent constant)
             if np.linalg.norm(new_state["base_position"]-state["base_position"]) > 1e-4:
@@ -619,46 +616,5 @@ class WeldingEnvironmentPybulletConfigSpace(WeldingEnvironmentPybullet):
         
         while not self.is_static:
             pyb.stepSimulation()
-
-    def _get_obs(self):
-        tmp = pyb.getLinkState(
-                            bodyUniqueId=self.robot,
-                            linkIndex=self.end_effector_link_id[self.robot_name],
-                            computeForwardKinematics=True  # need to check if this is necessary, if not can be turned off for performance gain
-            )
-        tmp2 = pyb.getLinkState(
-                            bodyUniqueId=self.robot,
-                            linkIndex=self.base_link_id[self.robot_name],
-                            computeForwardKinematics=True  # need to check if this is necessary, if not can be turned off for performance gain
-            )
-        return {
-            'position': np.array(tmp[0]),
-            'base_position':np.array(tmp2[4][:2]),  # only xy position of baselink
-            'rotation': self._quat_ee_to_w(np.array(tmp[1])),  # the quaternion given by getLinkState is in ee frame, we transform it to world frame (because our target rotations are in world frame)
-            'joints': self.get_joint_state()
-        }  
-
-    def movej(self, targj, speed=0.05, timeout=0.025, use_dynamics=False):
-        
-        if use_dynamics:
-            super().movej(targj, speed, timeout)
-        else:
-            currj = [pyb.getJointState(self.robot, i)[0] for i in self.joints]
-            currj = np.array(currj)
-            diffj = targj - currj
-            while any(np.abs(diffj) > 1e-2):
-                # Move with constant velocity
-                norm = np.linalg.norm(diffj)
-                if norm > speed:
-                    v = diffj / norm
-                    stepj = currj + v * speed
-                else:
-                    stepj = currj + diffj
-                self.set_joint_state(stepj)
-                pyb.stepSimulation()
-
-                currj = stepj
-                diffj = targj - currj
-            return False
 
         

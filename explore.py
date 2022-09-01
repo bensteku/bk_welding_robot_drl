@@ -20,15 +20,10 @@ a.goals = a.goals[18:]
 while not False:
     act = a.act(obs)
     #print(e._get_obs())
-    #print("action")
-    #print(act["translate_base"], act["translate"], act["rotate"])
     print("agent state")
     print(a.state)
     print("objective")
     print(a.objective)
-    #if a.trajectory:
-    #    for i in a.trajectory:
-    #        e.movej(i)
     obs, reward, done, success = e.step(act)
     print("obs")
     print(obs["position"], obs["rotation"])

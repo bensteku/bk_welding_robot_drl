@@ -57,10 +57,10 @@ class ActorNet(nn.Module):
 
         def forward(self, state):
             X = self.input_layer(state)
-            X = torch.tanh(X)
+            X = torch.relu(X)
             for layer in self.hidden:
                 X = layer(X)
-                X = torch.tanh(X)
+                X = torch.relu(X)
             
             mu = self.output_layer_mu(X)
             mu = torch.tanh(mu)
@@ -68,7 +68,9 @@ class ActorNet(nn.Module):
             sigma = self.output_layer_sigma(X)
             sigma = torch.sigmoid(sigma)
 
-            return mu, sigma
+            draw = torch.normal(mu, sigma)
+
+            return draw
 
 
 class CriticNet(nn.Module):

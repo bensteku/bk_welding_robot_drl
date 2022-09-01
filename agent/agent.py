@@ -86,7 +86,7 @@ class AgentPybullet(Agent):
         # radius of the circle around the goal position for the robot base in which a full reward will be given
         self.base_pos_reward_thresh = 1e-1
         # same as above, just for the end effector position
-        self.ee_pos_reward_thresh = 8e-2  # might need adjustment
+        self.ee_pos_reward_thresh = 5e-2  # might need adjustment
         # same as above, just for quaternion similarity (see util/util.py method)
         self.quat_sim_thresh = 4e-2  # this probably too
 
@@ -115,9 +115,9 @@ class AgentPybullet(Agent):
         """
         obs = self.env._get_obs()
         if self.objective:
-            state = np.hstack((obs["base_position"], obs["position"], obs["rotation"], self.objective[0], self.objective[1][0], self.objective[1][1]))
+            state = np.hstack((obs["base_position"], obs["position"], pyb.getEulerFromQuaternion(obs["rotation"]), obs["joints"], self.objective[0], self.objective[1][0], self.objective[1][1], [self.state]))
         else:
-            state = np.hstack((obs["base_position"], obs["position"], obs["rotation"], [0, 0, 0], [1, 0, 0], [1, 0, 0]))
+            state = np.hstack((obs["base_position"], obs["position"], pyb.getEulerFromQuaternion(obs["rotation"]), obs["joints"], [0, 0, 0], [1, 0, 0], [1, 0, 0], [self.state]))
         return state
 
     def _register_data(self):
@@ -211,6 +211,7 @@ class AgentPybullet(Agent):
             else:
                 # exponential decay up to threshold
                 reward += util.exp_decay(distance, 10, 3*self.base_pos_reward_thresh)
+                reward += 10 - distance * 5
         elif self.state == 3:
             # state for moving the ee upwards after one line has been welded
 
@@ -240,7 +241,7 @@ class AgentPybullet(Agent):
                 rot_done = True
             
             reward = reward * (quat_sim**0.5)  # take root of quaternion similarity to dampen its effect a bit
-        
+
         # hand out penalties
         if timeout:
             reward -= 20
@@ -249,9 +250,13 @@ class AgentPybullet(Agent):
             reward -= 50
             pos_done = False
             rot_done = False
+        elif col and (pos_done and rot_done):
+            col = False 
 
         if pos_done and rot_done:
             self.objective = None
+
+        
 
         success = (pos_done and rot_done or base_done) and not col
         done = (self.objective is None and len(self.plan)==0 and len(self.goals)==0) or col
@@ -270,18 +275,16 @@ class AgentPybulletNN(AgentPybullet):
     def act(self, agent_obs):
         """
         Act function for this agent. Parameters are slightly different: instead of a gym obs (OrderedDict) it takes a Pytorch tensor
-        which contains the gym information + information about the agents current goals (to differentiate between the two, it's called a agent_obs instead of obs)
+        which contains the gym information + information about the agents current goals (to differentiate between the two, it's called an agent_obs instead of obs)
         """
         
-        if not self.plan and not self.objective:  # only create new plan if there's also no current objective
+        if not self.plan and not self.objective and self.state != 3:  # only create new plan if there's also no current objective
             self._set_plan()
-        if not self.objective:
+        if not self.objective and self.state != 3:
             self._set_objective()
+            tool = self.objective[3]
+            self.env.switch_tool(tool)
 
-        tool = self.objective[3]
-        self.env.switch_tool(tool)
-
-        ## call neural net for action TODO
         action_tensor = self.model.choose_action(agent_obs)
         action_array = action_tensor.cpu().detach().numpy()
         action = OrderedDict()
@@ -291,7 +294,9 @@ class AgentPybulletNN(AgentPybullet):
 
         if self.state == 0:
             action["translate"] = np.array([action["translate_base"][0], action["translate_base"][1], 0])
-            action["rotate"] = np.array([0, 0, 0, 1])
+            action["rotate"] = np.array([0, 0, 0])
+        else:
+            action["translate_base"] = np.array([0, 0])
 
         return action
 
@@ -317,11 +322,6 @@ class AgentPybulletRRTPlanner(AgentPybullet):
             self._set_objective()
             tool = self.objective[3]
             self.env.switch_tool(tool)
-        
-        print("objective")
-        print(self.objective)
-        print("plan")
-        print(self.plan)
 
         action = OrderedDict()
         action["translate_base"] = np.array([0, 0])
@@ -355,7 +355,7 @@ class AgentPybulletRRTPlanner(AgentPybullet):
             action["joints"] = next_q
         elif self.state == 2:
             if not self.trajectory:
-                pos = util.pos_interpolate(obs["position"], self.objective[0] + self.objective[1][0] * 0.025 + self.objective[1][1] * 0.025, self.env.pos_speed/2)
+                pos = util.pos_interpolate(obs["position"], self.objective[0] + self.objective[1][0] * 0.025 + self.objective[1][1] * 0.025, self.env.pos_speed/1.25)
                 quat = util.quaternion_interpolate(obs["rotation"], self.objective[2], len(pos)-2)
                 quat = [self.env._quat_w_to_ee(qu) for qu in quat]
                 self.trajectory = list(zip(pos, quat))
