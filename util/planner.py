@@ -3,6 +3,7 @@ import numpy as np
 import pybullet as pyb
 from scipy.interpolate import interp1d
 from time import time
+import uuid
 
 class Node:
     """
@@ -13,7 +14,7 @@ class Node:
         self.q = np.array(q)  # configuration of a robot
         self.parent = parent
         #self.children = []  # not needed atm
-        self.delta = 0  # attribute that get's incremented every time a node is added further down this branch
+        self.delta = 0  # attribute that gets incremented every time a node is added further down this branch
 
 class Tree:
     """
@@ -36,10 +37,11 @@ class Tree:
         #closest.children.append(new)  # not needed atm
         self.nodes.append(new)
         tmp = new.parent
+        tmp.delta += 1
         # increment delta values up the chain
         while tmp.parent is not None:
-            tmp.delta += 1
             tmp = tmp.parent
+            tmp.delta += 1
         return new
 
     def nearest_neighbor(self, q, control):
@@ -54,6 +56,22 @@ class Tree:
                 min_dist = dist
                 closest = node
         return closest
+
+    def all_possible_paths(self):
+        start_nodes = []
+        for node in self.nodes:
+            if node.delta == 0:
+                start_nodes.append(node)
+        paths = []
+        for node in start_nodes:
+            tmp = node
+            path = []
+            path.append(tmp.q)
+            while tmp.parent is not None: 
+                tmp = tmp.parent
+                path.append(tmp.q)
+            paths.append(list(reversed(path)))
+        return paths
 
 def collision_fn(robot, joints, objs, ee, pos_start, pos_goal, thresh):
     """
@@ -72,16 +90,19 @@ def collision_fn(robot, joints, objs, ee, pos_start, pos_goal, thresh):
         - thresh: threshold distance for ignoring the collision check around start and goal position
     """
     def collision(q):
+        # get current config
         currj = [pyb.getJointState(robot, i)[0] for i in joints]
         for joint, val in zip(joints, q):
             pyb.resetJointState(robot, joint, val)    
+
+
         # if the q is within the vicinity of the goal or start configurations in cartesian space, skip collision detection
         # so that weld seams that are positioned inside a mesh can be dealt with
         
         cartesian_pos = np.array(pyb.getLinkState(
                             bodyUniqueId=robot,
                             linkIndex=ee,
-                            computeForwardKinematics=True  # need to check if this is necessary, if not can be turned off for performance gain
+                            computeForwardKinematics=True
             )[0])
         if np.linalg.norm(cartesian_pos - pos_start) < thresh or np.linalg.norm(cartesian_pos - pos_goal) < thresh:
             return False
@@ -91,6 +112,9 @@ def collision_fn(robot, joints, objs, ee, pos_start, pos_goal, thresh):
         for obj in objs:
             if pyb.getContactPoints(robot, obj):
                 col = True
+                break
+
+        # reset joints to original config
         for joint, val in zip(joints, currj):
             pyb.resetJointState(robot, joint, val)
         #col_self = True if pyb.getContactPoints(robot, robot, 1, 7) else False
@@ -214,7 +238,7 @@ def smooth_path(path, epsilon, free):
 
     return path_smooth
 
-def bi_rrt(q_start, q_final, goal_bias, robot, joints, objs, max_steps, epsilon, ee, pos_start, pos_goal, thresh, force_swap=100, smooth=True):
+def bi_rrt(q_start, q_final, goal_bias, robot, joints, objs, max_steps, epsilon, ee, pos_start, pos_goal, thresh, force_swap=100, smooth=True, save_all_paths=False):
     """
     Performs RRT algorithm with two trees that are swapped out if certain conditions apply.
     Params:
@@ -232,6 +256,7 @@ def bi_rrt(q_start, q_final, goal_bias, robot, joints, objs, max_steps, epsilon,
         - thresh: radius around pos_start/goal in which collision will be ignored
         - force_swap: number of times one of the two trees can stay swapped in before a swap will be forced
         - smooth: determines if the result path will be smoothed, takes some time, potentially even more than the initial search
+        - give_all_paths: determines if a list of all paths possible within both tress (even the ones that don't containt start or goal) is saved to a file
     """
     # start time for running time output down below
     start = time()
@@ -331,14 +356,24 @@ def bi_rrt(q_start, q_final, goal_bias, robot, joints, objs, max_steps, epsilon,
                 solution_found = time()
                 print("Solution found")
                 print("Time for solution: "+str(solution_found-start))
+                if save_all_paths:
+                    treeA_paths = treeA.all_possible_paths()
+                    treeA_paths = np.array(treeA_paths)
+                    treeB_paths = treeB.all_possible_paths()
+                    treeB_paths = np.array(treeB_paths)
+                    # generate random file name for this run of RRT planning
+                    filename = str(uuid.uuid4())
+                    with open("./scripts/saved_trees/"+filename+"_0.npy", "wb") as outfile:
+                        np.save(outfile, treeA_paths)
+                    with open("./scripts/saved_trees/"+filename+"_1.npy", "wb") as outfile:
+                        np.save(outfile, treeB_paths)   
                 if not smooth:
-                    pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
-                    return sol
+                    ret = sol
                 else:
-                    smoothed = smooth_path(sol, epsilon, free)
-                    print("Time for smoothing: "+str(time()-solution_found))
-                    pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
-                    return smoothed
+                    ret = smooth_path(sol, epsilon, free)
+                    print("Time for smoothing: "+str(time()-solution_found))                   
+                pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
+                return ret
             elif status == 2:
                 collisionB += 1
 
@@ -438,7 +473,7 @@ def rrt(q_start, q_final, goal_bias, robot, joints, obj, max_steps, epsilon, smo
     
     return None
 
-def interpolate_path(path):
+def interpolate_path(path, global_scale=1.0):
     """
     Method that takes a path of configurations and interpolates between its elements,
     resulting in the same trajectory but with more intermediate steps. The number of steps
@@ -451,11 +486,11 @@ def interpolate_path(path):
         scale_factors.append(dist)
     max_scale = max(scale_factors)
     for idx in range(len(scale_factors)):
-        scale_factors[idx] = scale_factors[idx]/max_scale
+        scale_factors[idx] = scale_factors[idx]/max_scale if max_scale != 0 else 1
     for idx in range(len(path)-1):
         values = np.vstack([path[idx], path[idx+1]])
         interpolator = interp1d([0,1], values, axis=0)
-        interp_values = np.linspace(0,1, int(50*scale_factors[idx]))
+        interp_values = np.linspace(0,1, int(50*scale_factors[idx]*global_scale))
         for value in interp_values:
             ret.append(interpolator(value))
 

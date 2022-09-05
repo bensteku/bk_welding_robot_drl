@@ -329,7 +329,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                 else:
                     stepj = currj + diffj
                 self.set_joint_state(stepj)
-                pyb.stepSimulation()
+                #pyb.stepSimulation()
 
                 currj = stepj
                 diffj = targj - currj
@@ -357,8 +357,8 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             upperLimits=self.joints_upper[self.robot_name],
             jointRanges=self.joints_range[self.robot_name],
             restPoses=np.float32(self.resting_pose_angles[self.robot_name]).tolist(),
-            maxNumIterations=55000,
-            residualThreshold=1e-9)
+            maxNumIterations=2000,
+            residualThreshold=5e-3)
         joints = np.float32(joints)
         joints[2:] = (joints[2:] + np.pi) % (2 * np.pi) - np.pi
         return joints

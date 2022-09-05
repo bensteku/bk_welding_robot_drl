@@ -47,8 +47,7 @@ class ActorNet(nn.Module):
         def __init__(self, input_dim, output_dim, hidden_sizes):
             super(ActorNet, self).__init__()
             self.input_layer = nn.Linear(input_dim, hidden_sizes[0])
-            self.output_layer_mu = nn.Linear(hidden_sizes[-1], output_dim)
-            self.output_layer_sigma = nn.Linear(hidden_sizes[-1], output_dim)
+            self.output_layer = nn.Linear(hidden_sizes[-1], output_dim)
             self.hidden = nn.ModuleList()
             for idx in range(len(hidden_sizes) - 1):
                 self.hidden.append(nn.Linear(hidden_sizes[idx], hidden_sizes[idx + 1]))
@@ -62,15 +61,13 @@ class ActorNet(nn.Module):
                 X = layer(X)
                 X = torch.relu(X)
             
-            mu = self.output_layer_mu(X)
-            mu = torch.tanh(mu)
+            res = self.output_layer(X)
+            res = torch.tanh(res)
+            res_mod = res.clone()
+            res_mod[:2] = res[:2] * 0.1
+            res_mod[2:] = res[2:] * 0.01
 
-            sigma = self.output_layer_sigma(X)
-            sigma = torch.sigmoid(sigma)
-
-            draw = torch.normal(mu, sigma)
-
-            return draw
+            return res_mod
 
 
 class CriticNet(nn.Module):

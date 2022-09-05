@@ -11,7 +11,9 @@ import random
 # wrapper class for Pytorch model of the agent
 # inspired by the architecture of MeshCNN
 
+# set to datatype to double for all Pytorch objects
 torch.set_default_dtype(torch.double)
+# useful for debugging, comment in if needed
 #torch.autograd.set_detect_anomaly(True)
 
 class AgentModel:
@@ -50,7 +52,7 @@ class AgentModelSimple(AgentModel):
 
         self.action_scale_factor = 0.001
 
-        sizes = [12, 12]
+        sizes = [128, 128]
         # input size: 2 for base position, 3 for ee position, 3 for ee rpy, 6 for joint state, 3 for objective position, 3 for norm1, 3 for norm2, 1 for agent state = 23 inputs
         # output size: 2 for base movement, 3 for ee movement, 3 for ee rpy change = 8 outputs
         self.actor = ActorNet(24, 8, sizes).to(self.device)
@@ -94,7 +96,7 @@ class AgentModelSimple(AgentModel):
 
         self.critic.train()
         self.critic.optimizer.zero_grad()
-        critic_loss = nn.functional.mse_loss(target, q_values)
+        critic_loss = nn.functional.smooth_l1_loss(target, q_values)
         critic_loss.backward()
         self.critic.optimizer.step()
 
@@ -103,31 +105,18 @@ class AgentModelSimple(AgentModel):
         actions = self.actor.forward(states)
         self.actor.train()
         actor_loss = -self.critic.forward(states, actions)
-        actor_loss = torch.mean(actor_loss)
+        actor_loss = torch.sum(actor_loss)
         actor_loss.backward()
         self.actor.optimizer.step()
 
-        self.soft_update()
+        self.soft_update(self.t_actor, self.actor)
+        self.soft_update(self.t_critic, self.critic)
 
-    def soft_update(self, tau = 0.5):
-        actor_params = self.actor.named_parameters()
-        critic_params = self.critic.named_parameters()
-        t_actor_params = self.t_actor.named_parameters()
-        t_critic_params = self.t_critic.named_parameters()
-
-        critic_state_dict = dict(critic_params)
-        actor_state_dict = dict(actor_params)
-        t_critic_dict = dict(t_critic_params)
-        t_actor_dict = dict(t_actor_params)
-
-        for name in critic_state_dict:
-            critic_state_dict[name] = tau*critic_state_dict[name].clone() + (1-tau)*t_critic_dict[name].clone()
-
-        self.t_critic.load_state_dict(critic_state_dict)
-
-        for name in actor_state_dict:
-            actor_state_dict[name] = tau*actor_state_dict[name].clone() + (1-tau)*t_actor_dict[name].clone()
-        self.t_actor.load_state_dict(actor_state_dict)
+    def soft_update(self, target, source, tau=0.01):
+        for target_param, param in zip(target.parameters(), source.parameters()):
+            target_param.data.copy_(
+                target_param.data * (1.0 - tau) + param.data * tau
+            )
 
 class ReplayMemory(object):
 

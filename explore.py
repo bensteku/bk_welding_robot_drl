@@ -4,7 +4,7 @@ from time import sleep
 
 #a = AgentPybulletOracle("./assets/objects/")
 a = AgentPybulletRRTPlanner("./assets/objects/")
-e = WeldingEnvironmentPybulletConfigSpace(a, "./assets/", True, robot="kr16", relative_movement=True)
+e = WeldingEnvironmentPybulletConfigSpace(a, "./assets/", True, robot="kr16")
 
 
 index = a.dataset["filenames"].index("201910204483_R1.urdf")

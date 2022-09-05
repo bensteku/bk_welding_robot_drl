@@ -210,7 +210,7 @@ class AgentPybullet(Agent):
                 base_done = True
             else:
                 # exponential decay up to threshold
-                reward += util.exp_decay(distance, 10, 3*self.base_pos_reward_thresh)
+                #reward += util.exp_decay(distance, 10, 3*self.base_pos_reward_thresh)
                 reward += 10 - distance * 5
         elif self.state == 3:
             # state for moving the ee upwards after one line has been welded
@@ -222,7 +222,8 @@ class AgentPybullet(Agent):
                 pos_done = True
                 rot_done = True
             else:
-                reward += util.exp_decay(distance, 10, 5*self.ee_pos_reward_thresh)
+                #reward += util.exp_decay(distance, 10, 5*self.ee_pos_reward_thresh)
+                reward += 10 - distance * 5
         else:
             # if the arm is in welding mode or moving to the start position for welding give out a reward in concordance to how far away it is from the desired position and how closely
             # it matches the ground truth rotation
@@ -234,7 +235,8 @@ class AgentPybullet(Agent):
                 reward += 20
                 pos_done = True  # objective achieved
             else:
-                reward += util.exp_decay(distance, 20, 20*self.ee_pos_reward_thresh)
+                #reward += util.exp_decay(distance, 20, 20*self.ee_pos_reward_thresh)
+                reward += 20 - distance * 5
 
             quat_sim = util.quaternion_similarity(self.objective[2], obs["rotation"])    
             if quat_sim > 1-self.quat_sim_thresh:
@@ -346,7 +348,7 @@ class AgentPybulletRRTPlanner(AgentPybullet):
                 q_goal = self.env.solve_ik((objective_with_slight_offset, self.env._quat_w_to_ee(self.objective[2])))
                 # the following line is needed because the configuration returned by inverse kinematics is often larger than 5e-3 away from the objective in cartesian space
                 pos_goal_from_q_goal = self.env.solve_fk(q_goal)[0]
-                traj_raw = planner.bi_rrt(q_cur, q_goal, 0.35, self.env.robot, self.env.joints, self.env.obj_ids, 500000, 1e-3, self.env.end_effector_link_id[self.env.robot_name], obs["position"], pos_goal_from_q_goal, 15e-3, 300)
+                traj_raw = planner.bi_rrt(q_cur, q_goal, 0.35, self.env.robot, self.env.joints, self.env.obj_ids, 500000, 1e-3, self.env.end_effector_link_id[self.env.robot_name], obs["position"], pos_goal_from_q_goal, 15e-3, 300, save_all_paths=True)
                 self.trajectory = planner.interpolate_path(traj_raw)
             next_q = self.trajectory.pop(0)
             #pos, quat = self.env.solve_fk(next_q)
@@ -372,7 +374,7 @@ class AgentPybulletRRTPlanner(AgentPybullet):
                 q_goal = self.env.solve_ik((goal_pos, self.env._quat_w_to_ee(np.array([0, 0, 0, 1]))))
                 # the following line is needed because the configuration returned by inverse kinematics is often larger than 5e-3 away from the objective in cartesian space
                 pos_goal_from_q_goal = self.env.solve_fk(q_goal)[0]
-                traj_raw = planner.bi_rrt(q_cur, q_goal, 0.35, self.env.robot, self.env.joints, self.env.obj_ids, 500000, 1e-3, self.env.end_effector_link_id[self.env.robot_name], obs["position"], pos_goal_from_q_goal, 15e-3, 300)
+                traj_raw = planner.bi_rrt(q_cur, q_goal, 0.35, self.env.robot, self.env.joints, self.env.obj_ids, 500000, 1e-3, self.env.end_effector_link_id[self.env.robot_name], obs["position"], pos_goal_from_q_goal, 15e-3, 300, save_all_paths=True)
                 self.trajectory = planner.interpolate_path(traj_raw)
             next_q = self.trajectory.pop(0)
             #pos, quat = self.env.solve_fk(next_q)
