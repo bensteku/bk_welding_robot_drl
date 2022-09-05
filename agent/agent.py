@@ -115,9 +115,9 @@ class AgentPybullet(Agent):
         """
         obs = self.env._get_obs()
         if self.objective:
-            state = np.hstack((obs["base_position"], obs["position"], pyb.getEulerFromQuaternion(obs["rotation"]), obs["joints"], self.objective[0], self.objective[1][0], self.objective[1][1], [self.state]))
+            state = np.hstack((obs[0], obs[1], pyb.getEulerFromQuaternion(obs[2]), obs[3], self.objective[0], self.objective[1][0], self.objective[1][1], [self.state]))
         else:
-            state = np.hstack((obs["base_position"], obs["position"], pyb.getEulerFromQuaternion(obs["rotation"]), obs["joints"], [0, 0, 0], [1, 0, 0], [1, 0, 0], [self.state]))
+            state = np.hstack((obs[0], obs[1], pyb.getEulerFromQuaternion(obs[2]), obs[3], [0, 0, 0], [1, 0, 0], [1, 0, 0], [self.state]))
         return state
 
     def _register_data(self):
@@ -203,7 +203,7 @@ class AgentPybullet(Agent):
         if self.state == 0:
             # if the arm is in moving mode, give out rewards for moving towards the general region of the objective
             # give full reward if a circular region around the xy-position of the next objective is reached
-            distance = np.linalg.norm(self.objective[4] - obs["base_position"])
+            distance = np.linalg.norm(self.objective[4] - obs[0])
             
             if distance < self.base_pos_reward_thresh:
                 reward += 10
@@ -216,7 +216,7 @@ class AgentPybullet(Agent):
             # state for moving the ee upwards after one line has been welded
 
             # simply measure distance up to safe height
-            distance = np.linalg.norm(np.array([obs["position"][0], obs["position"][1], self.safe_height]) - obs["position"]) 
+            distance = np.linalg.norm(np.array([obs[1][0], obs[1][1], self.safe_height]) - obs[1]) 
             if distance < self.ee_pos_reward_thresh:
                 reward += 10
                 pos_done = True
@@ -229,7 +229,7 @@ class AgentPybullet(Agent):
             # it matches the ground truth rotation
             # if the robot is in a problematic configuration (collision or not reachable(timeout)) give out a negative reward
             objective_with_slight_offset = self.objective[0] + self.objective[1][0] * 0.025 + self.objective[1][1] * 0.025
-            distance = np.linalg.norm(objective_with_slight_offset - obs["position"]) 
+            distance = np.linalg.norm(objective_with_slight_offset - obs[1]) 
             
             if distance < self.ee_pos_reward_thresh:
                 reward += 20
@@ -238,7 +238,7 @@ class AgentPybullet(Agent):
                 #reward += util.exp_decay(distance, 20, 20*self.ee_pos_reward_thresh)
                 reward += 20 - distance * 5
 
-            quat_sim = util.quaternion_similarity(self.objective[2], obs["rotation"])    
+            quat_sim = util.quaternion_similarity(self.objective[2], obs[2])    
             if quat_sim > 1-self.quat_sim_thresh:
                 rot_done = True
             
@@ -288,17 +288,13 @@ class AgentPybulletNN(AgentPybullet):
             self.env.switch_tool(tool)
 
         action_tensor = self.model.choose_action(agent_obs)
-        action_array = action_tensor.cpu().detach().numpy()
-        action = OrderedDict()
-        action["translate_base"] = action_array[:2]
-        action["translate"] = action_array[2:5]
-        action["rotate"] = action_array[5:]
+        action = action_tensor.cpu().detach().numpy()
 
         if self.state == 0:
-            action["translate"] = np.array([action["translate_base"][0], action["translate_base"][1], 0])
-            action["rotate"] = np.array([0, 0, 0])
+            action[2:5] = np.array([action[0], action[1], 0])
+            action[5:] = np.array([0, 0, 0])
         else:
-            action["translate_base"] = np.array([0, 0])
+            action[:2] = np.array([0, 0])
 
         return action
 
@@ -325,22 +321,20 @@ class AgentPybulletRRTPlanner(AgentPybullet):
             tool = self.objective[3]
             self.env.switch_tool(tool)
 
-        action = OrderedDict()
-        action["translate_base"] = np.array([0, 0])
-        action["joints"] = obs["joints"]
-        #action["translate"] = np.array([0, 0, 0])
-        #action["rotate"] = np.array([0, 0, 0, 1]) 
+        action = []
+        # index 0: base movement
+        action.append(np.array([0, 0]))
+        # index 1: joints to set
+        action.append(obs[3])
 
         if self.state == 0:
-            diff = self.objective[4] - obs["base_position"]
+            diff = self.objective[4] - obs[0]
             dist = np.linalg.norm(diff)
             if dist < self.env.base_speed:
-                action["translate_base"] = diff
-                #action["translate"] = np.array([diff[0], diff[1], 0.5 - obs["position"][2]])
+                action[0] = diff
             else:
                 diff = diff * (self.env.base_speed/dist)
-                action["translate_base"] = diff
-                #action["translate"] = np.array([diff[0], diff[1], 0.5 - obs["position"][2]])
+                action[0] = diff
         elif self.state == 1:
             if not self.trajectory:
                 objective_with_slight_offset = self.objective[0] + self.objective[1][0] * 0.025 + self.objective[1][1] * 0.025  # target position + a small part of the face norms of the weld seam
@@ -348,38 +342,32 @@ class AgentPybulletRRTPlanner(AgentPybullet):
                 q_goal = self.env.solve_ik((objective_with_slight_offset, self.env._quat_w_to_ee(self.objective[2])))
                 # the following line is needed because the configuration returned by inverse kinematics is often larger than 5e-3 away from the objective in cartesian space
                 pos_goal_from_q_goal = self.env.solve_fk(q_goal)[0]
-                traj_raw = planner.bi_rrt(q_cur, q_goal, 0.35, self.env.robot, self.env.joints, self.env.obj_ids, 500000, 1e-3, self.env.end_effector_link_id[self.env.robot_name], obs["position"], pos_goal_from_q_goal, 15e-3, 300, save_all_paths=True)
+                traj_raw = planner.bi_rrt(q_cur, q_goal, 0.35, self.env.robot, self.env.joints, self.env.obj_ids, 500000, 1e-3, self.env.end_effector_link_id[self.env.robot_name], obs[1], pos_goal_from_q_goal, 15e-3, 300, save_all_paths=True)
                 self.trajectory = planner.interpolate_path(traj_raw)
             next_q = self.trajectory.pop(0)
-            #pos, quat = self.env.solve_fk(next_q)
-            #action["translate"] = pos - obs["position"]
-            #action["rotate"] = quat
-            action["joints"] = next_q
+            action[1] = next_q
         elif self.state == 2:
             if not self.trajectory:
-                pos = util.pos_interpolate(obs["position"], self.objective[0] + self.objective[1][0] * 0.025 + self.objective[1][1] * 0.025, self.env.pos_speed/1.25)
-                quat = util.quaternion_interpolate(obs["rotation"], self.objective[2], len(pos)-2)
+                pos = util.pos_interpolate(obs[1], self.objective[0] + self.objective[1][0] * 0.025 + self.objective[1][1] * 0.025, self.env.pos_speed/1.25)
+                quat = util.quaternion_interpolate(obs[2], self.objective[2], len(pos)-2)
                 quat = [self.env._quat_w_to_ee(qu) for qu in quat]
                 self.trajectory = list(zip(pos, quat))
             next_pose = self.trajectory.pop(0)
             q_next = self.env.solve_ik(next_pose)
-            action["joints"] = q_next
+            action[1] = q_next
         elif self.state == 3:
             if not self.trajectory:
                 q_cur = self.env.get_joint_state()
                 # move ee to halfway between base and current position and height 0.5
-                diff = (obs["base_position"] - obs["position"][:2])/2
-                goal_pos = diff + obs["position"][:2]
+                diff = (obs[0] - obs[1][:2])/2
+                goal_pos = diff + obs[1][:2]
                 goal_pos = np.array([goal_pos[0], goal_pos[1], 0.5])
                 q_goal = self.env.solve_ik((goal_pos, self.env._quat_w_to_ee(np.array([0, 0, 0, 1]))))
                 # the following line is needed because the configuration returned by inverse kinematics is often larger than 5e-3 away from the objective in cartesian space
                 pos_goal_from_q_goal = self.env.solve_fk(q_goal)[0]
-                traj_raw = planner.bi_rrt(q_cur, q_goal, 0.35, self.env.robot, self.env.joints, self.env.obj_ids, 500000, 1e-3, self.env.end_effector_link_id[self.env.robot_name], obs["position"], pos_goal_from_q_goal, 15e-3, 300, save_all_paths=True)
+                traj_raw = planner.bi_rrt(q_cur, q_goal, 0.35, self.env.robot, self.env.joints, self.env.obj_ids, 500000, 1e-3, self.env.end_effector_link_id[self.env.robot_name], obs[1], pos_goal_from_q_goal, 15e-3, 300, save_all_paths=True)
                 self.trajectory = planner.interpolate_path(traj_raw)
             next_q = self.trajectory.pop(0)
-            #pos, quat = self.env.solve_fk(next_q)
-            #action["translate"] = pos - obs["position"]
-            #action["rotate"] = quat
-            action["joints"] = next_q
+            action[1] = next_q
 
         return action

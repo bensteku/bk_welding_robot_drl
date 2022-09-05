@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import open3d as o3d
 
 folder = "./scripts/saved_trees/"
-filename = "2acee10b-563b-4484-bacf-412ea7c6de3e"
+filename = "ee705586-81f7-407e-aa12-a59f8c1ad38d"
 mesh_folder = "./assets/objects/"
 meshfile = "201910204483_R1.obj"
 
@@ -134,14 +134,14 @@ fig = plt.figure()
 ax = fig.add_subplot(projection="3d")
 
 for idx in range(len(cartesian_paths_z_0)):
-    ax.scatter(cartesian_paths_x_0[idx], cartesian_paths_y_0[idx], cartesian_paths_z_0[idx], color="red")
+    ax.scatter(cartesian_paths_x_0[idx], cartesian_paths_y_0[idx], cartesian_paths_z_0[idx], color="red", s=2)
 for idx in range(len(cartesian_paths_z_1)):
-    ax.scatter(cartesian_paths_x_1[idx], cartesian_paths_y_1[idx], cartesian_paths_z_1[idx], color="blue")
+    ax.scatter(cartesian_paths_x_1[idx], cartesian_paths_y_1[idx], cartesian_paths_z_1[idx], color="blue", s=2)
 
 # emphasize the roots
 
-ax.scatter([root_0_xyz[0]], [root_0_xyz[1]], [root_0_xyz[2]], color="red", s=75)
-ax.scatter([root_1_xyz[0]], [root_1_xyz[1]], [root_1_xyz[2]], color="blue", s=75)
+ax.scatter([root_0_xyz[0]], [root_0_xyz[1]], [root_0_xyz[2]], color="red", s=100, marker='x')
+ax.scatter([root_1_xyz[0]], [root_1_xyz[1]], [root_1_xyz[2]], color="blue", s=100, marker='x')
 
 plt.show()
 #open3d tests

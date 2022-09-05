@@ -26,7 +26,7 @@ while not False:
     print(a.objective)
     obs, reward, done, success = e.step(act)
     print("obs")
-    print(obs["position"], obs["rotation"])
+    print(obs[1], obs[2])
     if success:
         a.trajectory = []
     print("reward")

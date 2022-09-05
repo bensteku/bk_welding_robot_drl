@@ -9,15 +9,6 @@ from collections import deque
 agent = AgentPybulletNN("./assets/objects/")
 env = WeldingEnvironmentPybullet(agent, "./assets/", True, robot="kr16")
 
-def dict_flatten(dict, tensor=True):
-    res = np.array([])
-    for key in dict:
-        res = np.hstack([res, dict[key]])
-    if tensor:
-        return torch.from_numpy(res)
-    else:
-        return res
-
 index = agent.dataset["filenames"].index("201910204483_R1.urdf")
 
 memory = ReplayMemory(10000)
@@ -38,7 +29,7 @@ for i_episode in range(num_episodes):
 
         # TODO: rewrite the action env interaction to directly take tensors/arrays instead of ordered dicts to avoid the spaghetti code below
         action = agent.act(torch.from_numpy(state_old).to(agent.model.device))
-        action_tensor = dict_flatten(action)
+        action_tensor = torch.from_numpy(action)
 
         _, reward, done, _ = env.step(action)
         reward_buffer.append(reward)
@@ -48,7 +39,7 @@ for i_episode in range(num_episodes):
         else:
             state_new = None
 
-        memory.push(state_old, dict_flatten(action, False), state_new, reward)
+        memory.push(state_old, action, state_new, reward)
         #print(reward)
 
         state_old = state_new
