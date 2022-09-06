@@ -27,9 +27,13 @@ for i_episode in range(num_episodes):
     
     for t in count():
 
-        # TODO: rewrite the action env interaction to directly take tensors/arrays instead of ordered dicts to avoid the spaghetti code below
+        # TODO: remove agent state 1, refactor code to account for that
+        # TODO: at save and load function to model
+        # TODO: look over model code again to ensure it actually works
+        # TODO: look at rewards again
+        # TODO: investigate whether it's possible to turn on rendering mid-session
+
         action = agent.act(torch.from_numpy(state_old).to(agent.model.device))
-        action_tensor = torch.from_numpy(action)
 
         _, reward, done, _ = env.step(action)
         reward_buffer.append(reward)
@@ -39,7 +43,7 @@ for i_episode in range(num_episodes):
         else:
             state_new = None
 
-        memory.push(state_old, action, state_new, reward)
+        memory.push(state_old, action[2:], state_new, reward) #ignore the base movement part of the action for the purposes of the NN
         #print(reward)
 
         state_old = state_new

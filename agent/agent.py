@@ -287,14 +287,25 @@ class AgentPybulletNN(AgentPybullet):
             tool = self.objective[3]
             self.env.switch_tool(tool)
 
-        action_tensor = self.model.choose_action(agent_obs)
-        action = action_tensor.cpu().detach().numpy()
+        
 
         if self.state == 0:
+            # if the agent is the state of moving the base, do not ask the NN and do it algorithmically instead
+            action = np.zeros(2+3+3)
+            diff = self.objective[4] - agent_obs.cpu().detach().numpy()[:2]
+            dist = np.linalg.norm(diff)
+            if dist < self.env.base_speed:
+                action[:2] = diff
+            else:
+                diff = diff * (self.env.base_speed/dist)
+                action[:2] = diff
             action[2:5] = np.array([action[0], action[1], 0])
             action[5:] = np.array([0, 0, 0])
         else:
-            action[:2] = np.array([0, 0])
+            # otherwise, ask the NN
+            action_tensor = self.model.choose_action(agent_obs)
+            action = action_tensor.cpu().detach().numpy()
+            action = np.hstack([np.array([0, 0]), action]) # set base movement to 0 while acting
 
         return action
 

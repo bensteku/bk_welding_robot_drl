@@ -54,13 +54,13 @@ class AgentModelSimple(AgentModel):
 
         sizes = [128, 128]
         # input size: 2 for base position, 3 for ee position, 3 for ee rpy, 6 for joint state, 3 for objective position, 3 for norm1, 3 for norm2, 1 for agent state = 23 inputs
-        # output size: 2 for base movement, 3 for ee movement, 3 for ee rpy change = 8 outputs
-        self.actor = ActorNet(24, 8, sizes).to(self.device)
-        # input size: 24 for state description, 8 for the action taken  = 31 inputs
-        self.critic = CriticNet(24 + 8, sizes).to(self.device)
+        # output size: 3 for ee movement, 3 for ee rpy change = 6 outputs
+        self.actor = ActorNet(24, 6, sizes).to(self.device)
+        # input size: 24 for state description, 6 for the action taken  = 30 inputs
+        self.critic = CriticNet(24 + 6, sizes).to(self.device)
 
-        self.t_actor = ActorNet(24, 8, sizes).to(self.device)
-        self.t_critic = CriticNet(24 + 8, sizes).to(self.device)
+        self.t_actor = ActorNet(24, 6, sizes).to(self.device)
+        self.t_critic = CriticNet(24 + 6, sizes).to(self.device)
 
         self.optimizations = 0
         self.training = True
@@ -123,7 +123,7 @@ class ReplayMemory(object):
     def __init__(self, capacity):
         self.states = np.zeros((capacity, 24))
         self.new_states = np.zeros((capacity, 24))
-        self.actions = np.zeros((capacity, 8))
+        self.actions = np.zeros((capacity, 6))
         self.rewards = np.zeros((capacity, 1))
 
         self.idx = 0
