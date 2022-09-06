@@ -8,13 +8,16 @@ import matplotlib.pyplot as plt
 import open3d as o3d
 
 folder = "./scripts/saved_trees/"
-filename = "ee705586-81f7-407e-aa12-a59f8c1ad38d"
+filename = "e870f74e-9a55-4629-a322-46bd956b0da6_0-68_1-22"
 mesh_folder = "./assets/objects/"
 meshfile = "201910204483_R1.obj"
 
-# TODO: add base position such that the open3d cartesian positions are correct, fix point cloud rendering in open3d
+open3d_or_matplotlib = 0
 
 # pybullet stuff
+
+base_pos_0 = float(filename.split("_")[1].replace("-","."))
+base_pos_1 = float(filename.split("_")[2].replace("-","."))
 
 client = pyb.connect(pyb.DIRECT)
 
@@ -27,7 +30,7 @@ pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)
 
 
 plane_id = pyb.loadURDF("workspace/plane.urdf", basePosition=[0, 0, -0.001])
-robot = pyb.loadURDF("kr16/kr16_tand_gerad.urdf", useFixedBase=True, basePosition=[0, 0, 2], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
+robot = pyb.loadURDF("kr16/kr16_tand_gerad.urdf", useFixedBase=True, basePosition=[base_pos_0, base_pos_1, 2], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
 
 joints = [pyb.getJointInfo(robot, i) for i in range(pyb.getNumJoints(robot))]
 joints = [j[0] for j in joints if j[2] == pyb.JOINT_REVOLUTE]
@@ -72,88 +75,108 @@ for path in paths_1:
     interpolated_paths_1.append(interpolate_path(path, 5))
 
 # run forward kinematics to get the actual trajectories in cartesian space for both trees
+if not open3d_or_matplotlib:
+    cartesian_paths_x_0 = []
+    cartesian_paths_y_0 = []
+    cartesian_paths_z_0 = []
+    for path in interpolated_paths_0:
+        cart_path_x = []
+        cart_path_y = []
+        cart_path_z = []
+        for config in path:
+            set_joints(config)
+            x, y, z = get_pos()
+            cart_path_x.append(x)
+            cart_path_y.append(y)
+            cart_path_z.append(z)
+        cartesian_paths_x_0.append(cart_path_x)
+        cartesian_paths_y_0.append(cart_path_y)
+        cartesian_paths_z_0.append(cart_path_z)
 
-cartesian_paths_x_0 = []
-cartesian_paths_y_0 = []
-cartesian_paths_z_0 = []
-for path in interpolated_paths_0:
-    cart_path_x = []
-    cart_path_y = []
-    cart_path_z = []
-    for config in path:
-        set_joints(config)
-        x, y, z = get_pos()
-        cart_path_x.append(x)
-        cart_path_y.append(y)
-        cart_path_z.append(z)
-    cartesian_paths_x_0.append(cart_path_x)
-    cartesian_paths_y_0.append(cart_path_y)
-    cartesian_paths_z_0.append(cart_path_z)
+    cartesian_paths_x_1 = []
+    cartesian_paths_y_1 = []
+    cartesian_paths_z_1 = []
+    for path in interpolated_paths_1:
+        cart_path_x = []
+        cart_path_y = []
+        cart_path_z = []
+        for config in path:
+            set_joints(config)
+            x, y, z = get_pos()
+            cart_path_x.append(x)
+            cart_path_y.append(y)
+            cart_path_z.append(z)
+        cartesian_paths_x_1.append(cart_path_x)
+        cartesian_paths_y_1.append(cart_path_y)
+        cartesian_paths_z_1.append(cart_path_z)
+else:
+    cartesian_paths_0 = []
+    for path in interpolated_paths_0:
+        cart_path = []
+        for config in path:
+            set_joints(config)
+            xyz = get_pos()
+            cart_path.append(xyz)
+        cartesian_paths_0.append(cart_path)
+    cartesian_paths_0 = np.array(cartesian_paths_0)
 
-cartesian_paths_x_1 = []
-cartesian_paths_y_1 = []
-cartesian_paths_z_1 = []
-for path in interpolated_paths_1:
-    cart_path_x = []
-    cart_path_y = []
-    cart_path_z = []
-    for config in path:
-        set_joints(config)
-        x, y, z = get_pos()
-        cart_path_x.append(x)
-        cart_path_y.append(y)
-        cart_path_z.append(z)
-    cartesian_paths_x_1.append(cart_path_x)
-    cartesian_paths_y_1.append(cart_path_y)
-    cartesian_paths_z_1.append(cart_path_z)
-# open3d tests
-"""
-cartesian_paths_0 = []
-for path in interpolated_paths_0:
-    cart_path = []
-    for config in path:
-        set_joints(config)
-        xyz = get_pos()
-        cart_path.append(xyz)
-    cartesian_paths_0.append(cart_path)
-cartesian_paths_0 = np.array(cartesian_paths_0)
+    cartesian_paths_1 = []
+    for path in interpolated_paths_1:
+        cart_path = []
+        for config in path:
+            set_joints(config)
+            xyz = get_pos()
+            cart_path.append(xyz)
+        cartesian_paths_1.append(cart_path)
+    cartesian_paths_1 = np.array(cartesian_paths_1)
 
-cartesian_paths_1 = []
-for path in interpolated_paths_1:
-    cart_path = []
-    for config in path:
-        set_joints(config)
-        xyz = get_pos()
-        cart_path.append(xyz)
-    cartesian_paths_1.append(cart_path)
-cartesian_paths_1 = np.array(cartesian_paths_1)
-"""
 # plot the trajectories
+if not open3d_or_matplotlib:
+    fig = plt.figure()
+    ax = fig.add_subplot(projection="3d")
 
-fig = plt.figure()
-ax = fig.add_subplot(projection="3d")
+    for idx in range(len(cartesian_paths_z_0)):
+        ax.scatter(cartesian_paths_x_0[idx], cartesian_paths_y_0[idx], cartesian_paths_z_0[idx], color="red", s=2)
+    for idx in range(len(cartesian_paths_z_1)):
+        ax.scatter(cartesian_paths_x_1[idx], cartesian_paths_y_1[idx], cartesian_paths_z_1[idx], color="blue", s=2)
 
-for idx in range(len(cartesian_paths_z_0)):
-    ax.scatter(cartesian_paths_x_0[idx], cartesian_paths_y_0[idx], cartesian_paths_z_0[idx], color="red", s=2)
-for idx in range(len(cartesian_paths_z_1)):
-    ax.scatter(cartesian_paths_x_1[idx], cartesian_paths_y_1[idx], cartesian_paths_z_1[idx], color="blue", s=2)
+    # emphasize the roots
 
-# emphasize the roots
+    ax.scatter([root_0_xyz[0]], [root_0_xyz[1]], [root_0_xyz[2]], color="red", s=100, marker='x')
+    ax.scatter([root_1_xyz[0]], [root_1_xyz[1]], [root_1_xyz[2]], color="blue", s=100, marker='x')
 
-ax.scatter([root_0_xyz[0]], [root_0_xyz[1]], [root_0_xyz[2]], color="red", s=100, marker='x')
-ax.scatter([root_1_xyz[0]], [root_1_xyz[1]], [root_1_xyz[2]], color="blue", s=100, marker='x')
+    plt.show()
+else:
+    # create a dataset of points and indices such that open3d can recognize these as lines
+    points = []
+    lines = []
+    colors = []
+    for path in cartesian_paths_0:
+        points.append(path[0])
+        for idx, point in enumerate(path[1:]):
+            points.append(point)
+            lines.append([idx, idx+1])
+            colors.append([1, 0, 0])
+    for path in cartesian_paths_1:
+        points.append(path[0])
+        for idx, point in enumerate(path[1:]):
+            points.append(point)
+            lines.append([idx, idx+1])
+            colors.append([0, 1, 0])
 
-plt.show()
-#open3d tests
-"""
-elements = []
-mesh_model = o3d.io.read_triangle_mesh(mesh_folder+meshfile)
-pcd0 = o3d.geometry.PointCloud()
-pcd0.points = o3d.utility.Vector3dVector(np.squeeze(cartesian_paths_0))
-pcd1 = o3d.geometry.PointCloud()
-pcd1.points = o3d.utility.Vector3dVector(np.squeeze(cartesian_paths_1))
-elements.append(mesh_model)
-elements.append(pcd0)
-elements.append(pcd1)
-o3d.visualization.draw_geometries(elements)
-"""
+    elements = []
+    mesh_model = o3d.io.read_triangle_mesh(mesh_folder+meshfile)
+    mesh_model.scale(scale=0.0005, center=[0, 0, 0])
+    mesh_model.compute_vertex_normals()
+    #pcd0 = o3d.geometry.PointCloud()
+    #pcd0.points = o3d.utility.Vector3dVector(np.squeeze(cartesian_paths_0))
+    #pcd1 = o3d.geometry.PointCloud()
+    #pcd1.points = o3d.utility.Vector3dVector(np.squeeze(cartesian_paths_1))
+    line_set = o3d.geometry.LineSet()
+    line_set.points = o3d.utility.Vector3dVector(points)
+    line_set.lines = o3d.utility.Vector2iVector(lines)
+    line_set.colors = o3d.utility.Vector3dVector(colors)
+    elements.append(mesh_model)
+    elements.append(line_set)
+    o3d.visualization.draw_geometries(elements)
+

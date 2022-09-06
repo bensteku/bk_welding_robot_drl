@@ -342,7 +342,7 @@ class AgentPybulletRRTPlanner(AgentPybullet):
                 q_goal = self.env.solve_ik((objective_with_slight_offset, self.env._quat_w_to_ee(self.objective[2])))
                 # the following line is needed because the configuration returned by inverse kinematics is often larger than 5e-3 away from the objective in cartesian space
                 pos_goal_from_q_goal = self.env.solve_fk(q_goal)[0]
-                traj_raw = planner.bi_rrt(q_cur, q_goal, 0.35, self.env.robot, self.env.joints, self.env.obj_ids, 500000, 1e-3, self.env.end_effector_link_id[self.env.robot_name], obs[1], pos_goal_from_q_goal, 15e-3, 300, save_all_paths=True)
+                traj_raw = planner.bi_rrt(q_cur, q_goal, 0.35, self.env.robot, self.env.joints, self.env.obj_ids, 500000, 1e-3, self.env.end_effector_link_id[self.env.robot_name], obs[1], pos_goal_from_q_goal, 15e-3, 300, save_all_paths=True, base_position=obs[:2])
                 self.trajectory = planner.interpolate_path(traj_raw)
             next_q = self.trajectory.pop(0)
             action[2:] = next_q
@@ -365,7 +365,7 @@ class AgentPybulletRRTPlanner(AgentPybullet):
                 q_goal = self.env.solve_ik((goal_pos, self.env._quat_w_to_ee(np.array([0, 0, 0, 1]))))
                 # the following line is needed because the configuration returned by inverse kinematics is often larger than 5e-3 away from the objective in cartesian space
                 pos_goal_from_q_goal = self.env.solve_fk(q_goal)[0]
-                traj_raw = planner.bi_rrt(q_cur, q_goal, 0.35, self.env.robot, self.env.joints, self.env.obj_ids, 500000, 1e-3, self.env.end_effector_link_id[self.env.robot_name], obs[1], pos_goal_from_q_goal, 15e-3, 300, save_all_paths=True)
+                traj_raw = planner.bi_rrt(q_cur, q_goal, 0.35, self.env.robot, self.env.joints, self.env.obj_ids, 500000, 1e-3, self.env.end_effector_link_id[self.env.robot_name], obs[1], pos_goal_from_q_goal, 15e-3, 300, save_all_paths=True, base_position=obs[:2])
                 self.trajectory = planner.interpolate_path(traj_raw)
             next_q = self.trajectory.pop(0)
             action[2:] = next_q

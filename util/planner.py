@@ -240,7 +240,7 @@ def smooth_path(path, epsilon, free):
 
     return path_smooth
 
-def bi_rrt(q_start, q_final, goal_bias, robot, joints, objs, max_steps, epsilon, ee, pos_start, pos_goal, thresh, force_swap=100, smooth=True, save_all_paths=False):
+def bi_rrt(q_start, q_final, goal_bias, robot, joints, objs, max_steps, epsilon, ee, pos_start, pos_goal, thresh, force_swap=100, smooth=True, save_all_paths=False, base_position=(0,0)):
     """
     Performs RRT algorithm with two trees that are swapped out if certain conditions apply.
     Params:
@@ -259,6 +259,7 @@ def bi_rrt(q_start, q_final, goal_bias, robot, joints, objs, max_steps, epsilon,
         - force_swap: number of times one of the two trees can stay swapped in before a swap will be forced
         - smooth: determines if the result path will be smoothed, takes some time, potentially even more than the initial search
         - give_all_paths: determines if a list of all paths possible within both tress (even the ones that don't containt start or goal) is saved to a file
+        - base_position: tuple of floats that gives the base position of the robot, only used when give_all_paths is true
     """
     # start time for running time output down below
     start = time()
@@ -363,11 +364,13 @@ def bi_rrt(q_start, q_final, goal_bias, robot, joints, objs, max_steps, epsilon,
                     treeA_paths = np.array(treeA_paths)
                     treeB_paths = treeB.all_possible_paths()
                     treeB_paths = np.array(treeB_paths)
+                    base_pos_0 = str(round(base_position[0], 2)).replace(".","-")
+                    base_pos_1 = str(round(base_position[1], 2)).replace(".","-")
                     # generate random file name for this run of RRT planning
                     filename = str(uuid.uuid4())
-                    with open("./scripts/saved_trees/"+filename+"_0.npy", "wb") as outfile:
+                    with open("./scripts/saved_trees/"+filename+"_"+base_pos_0+"_"+base_pos_1+"_0.npy", "wb") as outfile:
                         np.save(outfile, treeA_paths)
-                    with open("./scripts/saved_trees/"+filename+"_1.npy", "wb") as outfile:
+                    with open("./scripts/saved_trees/"+filename+"_"+base_pos_0+"_"+base_pos_1+"_1.npy", "wb") as outfile:
                         np.save(outfile, treeB_paths)   
                 if not smooth:
                     ret = sol
