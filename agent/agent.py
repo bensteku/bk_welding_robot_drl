@@ -115,9 +115,9 @@ class AgentPybullet(Agent):
         """
         obs = self.env._get_obs()
         if self.objective:
-            state = np.hstack((obs[0], obs[1], pyb.getEulerFromQuaternion(obs[2]), obs[3], self.objective[0], self.objective[1][0], self.objective[1][1], [self.state]))
+            state = np.hstack((obs[:2], obs[2:5], pyb.getEulerFromQuaternion(obs[5:9]), obs[9:], self.objective[0], self.objective[1][0], self.objective[1][1], [self.state]))
         else:
-            state = np.hstack((obs[0], obs[1], pyb.getEulerFromQuaternion(obs[2]), obs[3], [0, 0, 0], [1, 0, 0], [1, 0, 0], [self.state]))
+            state = np.hstack((obs[:2], obs[2:5], pyb.getEulerFromQuaternion(obs[5:9]), obs[9:], [0, 0, 0], [1, 0, 0], [1, 0, 0], [self.state]))
         return state
 
     def _register_data(self):
@@ -203,7 +203,7 @@ class AgentPybullet(Agent):
         if self.state == 0:
             # if the arm is in moving mode, give out rewards for moving towards the general region of the objective
             # give full reward if a circular region around the xy-position of the next objective is reached
-            distance = np.linalg.norm(self.objective[4] - obs[0])
+            distance = np.linalg.norm(self.objective[4] - obs[:2])
             
             if distance < self.base_pos_reward_thresh:
                 reward += 10
@@ -216,7 +216,7 @@ class AgentPybullet(Agent):
             # state for moving the ee upwards after one line has been welded
 
             # simply measure distance up to safe height
-            distance = np.linalg.norm(np.array([obs[1][0], obs[1][1], self.safe_height]) - obs[1]) 
+            distance = np.linalg.norm(np.array([obs[2], obs[3], self.safe_height]) - obs[2:5]) 
             if distance < self.ee_pos_reward_thresh:
                 reward += 10
                 pos_done = True
@@ -229,7 +229,7 @@ class AgentPybullet(Agent):
             # it matches the ground truth rotation
             # if the robot is in a problematic configuration (collision or not reachable(timeout)) give out a negative reward
             objective_with_slight_offset = self.objective[0] + self.objective[1][0] * 0.025 + self.objective[1][1] * 0.025
-            distance = np.linalg.norm(objective_with_slight_offset - obs[1]) 
+            distance = np.linalg.norm(objective_with_slight_offset - obs[2:5]) 
             
             if distance < self.ee_pos_reward_thresh:
                 reward += 20
@@ -238,7 +238,7 @@ class AgentPybullet(Agent):
                 #reward += util.exp_decay(distance, 20, 20*self.ee_pos_reward_thresh)
                 reward += 20 - distance * 5
 
-            quat_sim = util.quaternion_similarity(self.objective[2], obs[2])    
+            quat_sim = util.quaternion_similarity(self.objective[2], obs[5:9])    
             if quat_sim > 1-self.quat_sim_thresh:
                 rot_done = True
             
@@ -321,20 +321,20 @@ class AgentPybulletRRTPlanner(AgentPybullet):
             tool = self.objective[3]
             self.env.switch_tool(tool)
 
-        action = []
-        # index 0: base movement
-        action.append(np.array([0, 0]))
-        # index 1: joints to set
-        action.append(obs[3])
+        # action as flat array of floats
+        # index 0-1: base movement
+        # index 1-5: joints
+        # set to no base movement and current joints as defaults
+        action = np.hstack([np.array([0,0]), obs[9:]])
 
         if self.state == 0:
-            diff = self.objective[4] - obs[0]
+            diff = self.objective[4] - obs[:2]
             dist = np.linalg.norm(diff)
             if dist < self.env.base_speed:
-                action[0] = diff
+                action[:2] = diff
             else:
                 diff = diff * (self.env.base_speed/dist)
-                action[0] = diff
+                action[:2] = diff
         elif self.state == 1:
             if not self.trajectory:
                 objective_with_slight_offset = self.objective[0] + self.objective[1][0] * 0.025 + self.objective[1][1] * 0.025  # target position + a small part of the face norms of the weld seam
@@ -345,22 +345,22 @@ class AgentPybulletRRTPlanner(AgentPybullet):
                 traj_raw = planner.bi_rrt(q_cur, q_goal, 0.35, self.env.robot, self.env.joints, self.env.obj_ids, 500000, 1e-3, self.env.end_effector_link_id[self.env.robot_name], obs[1], pos_goal_from_q_goal, 15e-3, 300, save_all_paths=True)
                 self.trajectory = planner.interpolate_path(traj_raw)
             next_q = self.trajectory.pop(0)
-            action[1] = next_q
+            action[2:] = next_q
         elif self.state == 2:
             if not self.trajectory:
-                pos = util.pos_interpolate(obs[1], self.objective[0] + self.objective[1][0] * 0.025 + self.objective[1][1] * 0.025, self.env.pos_speed/1.25)
-                quat = util.quaternion_interpolate(obs[2], self.objective[2], len(pos)-2)
+                pos = util.pos_interpolate(obs[2:5], self.objective[0] + self.objective[1][0] * 0.025 + self.objective[1][1] * 0.025, self.env.pos_speed/1.25)
+                quat = util.quaternion_interpolate(obs[5:9], self.objective[2], len(pos)-2)
                 quat = [self.env._quat_w_to_ee(qu) for qu in quat]
                 self.trajectory = list(zip(pos, quat))
             next_pose = self.trajectory.pop(0)
             q_next = self.env.solve_ik(next_pose)
-            action[1] = q_next
+            action[2:] = q_next
         elif self.state == 3:
             if not self.trajectory:
                 q_cur = self.env.get_joint_state()
                 # move ee to halfway between base and current position and height 0.5
-                diff = (obs[0] - obs[1][:2])/2
-                goal_pos = diff + obs[1][:2]
+                diff = (obs[:2] - obs[2:4])/2
+                goal_pos = diff + obs[2:4]
                 goal_pos = np.array([goal_pos[0], goal_pos[1], 0.5])
                 q_goal = self.env.solve_ik((goal_pos, self.env._quat_w_to_ee(np.array([0, 0, 0, 1]))))
                 # the following line is needed because the configuration returned by inverse kinematics is often larger than 5e-3 away from the objective in cartesian space
@@ -368,6 +368,6 @@ class AgentPybulletRRTPlanner(AgentPybullet):
                 traj_raw = planner.bi_rrt(q_cur, q_goal, 0.35, self.env.robot, self.env.joints, self.env.obj_ids, 500000, 1e-3, self.env.end_effector_link_id[self.env.robot_name], obs[1], pos_goal_from_q_goal, 15e-3, 300, save_all_paths=True)
                 self.trajectory = planner.interpolate_path(traj_raw)
             next_q = self.trajectory.pop(0)
-            action[1] = next_q
+            action[2:] = next_q
 
         return action

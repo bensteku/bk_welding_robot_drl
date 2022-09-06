@@ -71,6 +71,8 @@ class Tree:
                 tmp = tmp.parent
                 path.append(tmp.q)
             paths.append(list(reversed(path)))
+        if not start_nodes:
+            paths.append([self.root.q])
         return paths
 
 def collision_fn(robot, joints, objs, ee, pos_start, pos_goal, thresh):
