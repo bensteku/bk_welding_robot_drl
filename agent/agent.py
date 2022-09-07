@@ -17,8 +17,8 @@ class Agent:
         self.asset_files_path = asset_files_path
         self.dataset = self._register_data()
 
-        # state variable, 0: moving ee down to weld seam, 1: welding, 2: moving ee back up
-        self.state = 0  
+        # path state variable, 0: moving ee down to weld seam, 1: welding, 2: moving ee back up
+        self.path_state = 0  
 
         # goals: overall collection of weldseams that are left to be dealt with
         # plan: expansion of intermediate steps containted within one weldseam
@@ -36,18 +36,18 @@ class Agent:
         """
 
         # if agent is in state 0 or 1 an objective has been completed
-        if self.state == 0 or self.state == 1:
+        if self.path_state == 0 or self.path_state == 1:
             self.objective = None
         # if the agent is in state 1 and the plan is not empty yet, that means is should remain in state 1
         # because it has more linear welding steps to complete
-        if self.state == 1 and len(self.plan) != 0:
-            return self.state
+        if self.path_state == 1 and len(self.plan) != 0:
+            return self.path_state
         else:
             # otherwise it's in another state or it's in state 1 but there's currently no more welding to be done,
             # then increment state or wrap back around if in state 2
-            self.state = self.state + 1 if self.state < 2 else 0
+            self.path_state = self.path_state + 1 if self.path_state < 2 else 0
 
-        return self.state
+        return self.path_state
 
     def _set_env(self, senv: env.WeldingEnvironment):
         """
@@ -117,9 +117,9 @@ class AgentPybullet(Agent):
         """
         obs = self.env._get_obs()
         if self.objective:
-            state = np.hstack((obs[:2], obs[2:5], pyb.getEulerFromQuaternion(obs[5:9]), obs[9:], self.objective[0], self.objective[1][0], self.objective[1][1], [self.state]))
+            state = np.hstack((obs[:2], obs[2:5], pyb.getEulerFromQuaternion(obs[5:9]), obs[9:], self.objective[0], self.objective[1][0], self.objective[1][1], [self.path_state]))
         else:
-            state = np.hstack((obs[:2], obs[2:5], pyb.getEulerFromQuaternion(obs[5:9]), obs[9:], [0, 0, 0], [1, 0, 0], [1, 0, 0], [self.state]))
+            state = np.hstack((obs[:2], obs[2:5], pyb.getEulerFromQuaternion(obs[5:9]), obs[9:], [0, 0, 0], [1, 0, 0], [1, 0, 0], [self.path_state]))
         return state
 
     def _register_data(self):
@@ -151,6 +151,7 @@ class AgentPybullet(Agent):
             index: int, signifies index in the dataset array
         """
 
+        self.goals = []
         frames = self.dataset["frames"][index]
         for frame in frames:
             tmp = {}
@@ -191,9 +192,9 @@ class AgentPybullet(Agent):
         Just a wrapper method for convenience
         """
 
-        if not self.plan and not self.objective and self.state != 2:  # only create new plan if there's also no current objective
+        if not self.plan and not self.objective and self.path_state != 2:  # only create new plan if there's also no current objective
             self._set_plan()
-        if not self.objective and self.state != 2:
+        if not self.objective and self.path_state != 2:
             self._set_objective()
             tool = self.objective[3]
             self.env.switch_tool(tool)
@@ -214,18 +215,18 @@ class AgentPybullet(Agent):
         # base reward
         reward = 0
 
-        if self.state == 2:
+        if self.path_state == 2:
             # state for moving the ee upwards after one line has been welded
 
             # simply measure distance up to safe height
             distance = np.linalg.norm(np.array([obs[2], obs[3], self.safe_height]) - obs[2:5]) 
             if distance < self.ee_pos_reward_thresh:
-                reward += 10
+                reward += 20
                 pos_done = True
                 rot_done = True
             else:
-                #reward += util.exp_decay(distance, 10, 5*self.ee_pos_reward_thresh)
-                reward += 10 - distance * 5
+                reward += util.exp_decay_alt(distance, 20, 2*self.ee_pos_reward_thresh)
+                #reward += 10 - distance * 2.5
         else:
             # if the arm is in welding mode or moving to the start position for welding give out a reward in concordance to how far away it is from the desired position and how closely
             # it matches the ground truth rotation
@@ -237,8 +238,8 @@ class AgentPybullet(Agent):
                 reward += 20
                 pos_done = True  # objective achieved
             else:
-                #reward += util.exp_decay(distance, 20, 20*self.ee_pos_reward_thresh)
-                reward += 20 - distance * 5
+                reward += util.exp_decay_alt(distance, 20, 2*self.ee_pos_reward_thresh)
+                #reward += 20 - distance * 2.5
 
             quat_sim = util.quaternion_similarity(self.objective[2], obs[5:9])    
             if quat_sim > 1-self.quat_sim_thresh:
@@ -251,7 +252,7 @@ class AgentPybullet(Agent):
             reward -= 20
         col = self.env.is_in_collision()
         if col and not (pos_done and rot_done):
-            reward -= 50
+            reward = -1
             pos_done = False
             rot_done = False
         elif col and (pos_done and rot_done):
@@ -276,17 +277,44 @@ class AgentPybulletNN(AgentPybullet):
         super().__init__(asset_files_path)
         self.model = AgentModelSimple()
 
-    def act(self, agent_obs):
+    def act(self, agent_state):
         """
         Act function for this agent. Parameters are slightly different: instead of a gym obs (OrderedDict) it takes a Pytorch tensor
-        which contains the gym information + information about the agents current goals (to differentiate between the two, it's called an agent_obs instead of obs)
+        which contains the gym information + information about the agents current goals (to differentiate between the two, it's called an agent_state instead of obs)
         """
 
         # ask the NN
-        action_tensor = self.model.choose_action(agent_obs)
+        action_tensor = self.model.choose_action(agent_state)
         action = action_tensor.cpu().detach().numpy()
 
         return action
+
+    def normalize_state(self, agent_state):
+        """
+        Method to normalize the state such that the inputs for the NN are between -1 and 1
+        Expects a numpy array, not a pytorch tensor
+        """
+        # both base position and ee position can be expressed as a percentage of their upper bound by simple division with it
+        # this works as long as the lower bound stays at 0
+        normalized_base_position = agent_state[:2] / self.env.observation_space.spaces["base_position"].high  # element-wise division
+        normalized_ee_position = agent_state[2:5] / self.env.observation_space.spaces["position"].high 
+        # the rpy values are projected to between -1 and 1 with max and min values being pi and -pi
+        normalized_rpy = 2 * ((agent_state[5:8] + np.ones(3) * np.pi) / (np.ones(3) * 2 * np.pi)) - np.ones(3) # -(-)pi/(pi-(-)pi), standard lower-upper-bound formula
+        # the joint values are normalized via the saved joint limits
+        normalized_joints = 2 * ((agent_state[8:14] - self.env.joints_lower[self.env.robot_name]) / (self.env.joints_range[self.env.robot_name])) - np.ones(6)
+        # the objective position needs to be normalized via the upper bound as above with the ee, the norms are already normalized
+        normalized_objective_position = agent_state[14:17] / self.env.observation_space.spaces["position"].high
+        # finally, the agent path state can be normalized by dividing by 2, as there are only 3 states
+        normalized_agent_path_state = agent_state[23] / 2
+
+        return np.hstack([normalized_base_position, normalized_ee_position, normalized_rpy, normalized_joints, normalized_objective_position, agent_state[17:23], normalized_agent_path_state])
+
+
+    def denormalize_state(self, normalized_state):
+        """
+        Method to restore a normalized state to its actual dimensions in Pybullet
+        """
+        pass  # TBD if even needed
 
 class AgentPybulletRRTPlanner(AgentPybullet):
     """
@@ -309,7 +337,7 @@ class AgentPybulletRRTPlanner(AgentPybullet):
         # set to current joints as defaults
         action =  obs[9:]
 
-        if self.state == 0:
+        if self.path_state == 0:
             if not self.trajectory:
                 objective_with_slight_offset = self.objective[0] + self.objective[1][0] * 0.01 + self.objective[1][1] * 0.01  # target position + a small part of the face norms of the weld seam
                 q_cur = self.env.get_joint_state()
@@ -320,7 +348,7 @@ class AgentPybulletRRTPlanner(AgentPybullet):
                 self.trajectory = planner.interpolate_path(traj_raw)
             next_q = self.trajectory.pop(0)
             action = next_q
-        elif self.state == 1:
+        elif self.path_state == 1:
             if not self.trajectory:
                 pos = util.pos_interpolate(obs[2:5], self.objective[0] + self.objective[1][0] * 0.01 + self.objective[1][1] * 0.01, self.env.pos_speed/1.25)
                 quat = util.quaternion_interpolate(obs[5:9], self.objective[2], len(pos)-2)
@@ -329,7 +357,7 @@ class AgentPybulletRRTPlanner(AgentPybullet):
             next_pose = self.trajectory.pop(0)
             q_next = self.env.solve_ik(next_pose)
             action = q_next
-        elif self.state == 2:
+        elif self.path_state == 2:
             if not self.trajectory:
                 q_cur = self.env.get_joint_state()
                 # move ee to halfway between base and current position and height 0.5

@@ -2,7 +2,7 @@ import gym
 import pybullet as pyb
 import time
 import numpy as np
-from util.util import matrix_to_quaternion, quaternion_diff, quaternion_normalize, rpy_to_quaternion, quaternion_to_rpy, quaternion_multiply, quaternion_invert
+from util.util import matrix_to_quaternion, quaternion_diff, quaternion_normalize, rpy_to_quaternion, quaternion_to_rpy, quaternion_multiply, quaternion_invert, suppress_stdout
 from collections import OrderedDict
 
 class WeldingEnvironment(gym.Env):
@@ -126,21 +126,23 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         # disable rendering for performance, becomes especially relevant if reset is called over and over again
         pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)
 
-        # load ground plane to hold objects in place
-        plane_id = pyb.loadURDF("workspace/plane.urdf", basePosition=[0, 0, -0.001])
-        self.obj_ids.append(plane_id)
+        # load in the meshes, the function here supresses the pointless pybullet warnings
+        with suppress_stdout():
+            # load ground plane to hold objects in place
+            plane_id = pyb.loadURDF("workspace/plane.urdf", basePosition=[0, 0, -0.001])
+            self.obj_ids.append(plane_id)
 
-        # TODO: load in welding table
+            # TODO: load in welding table
 
-        # load robot arm and set it to its default pose
-        # info: the welding torch is contained within the urdf file of the robot
-        # I tried to do this via a constraint connecting the end effector link with the torch loaded in as a separate urf
-        # this works, but one cannot then use the pybullet inverse kinematics method for the the tip of the torch
-        # because it relies on using a link within the robot urdf
-        if not self.tool:
-            self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_mrw510.urdf", useFixedBase=True, basePosition=[0, 0, self.fixed_height[self.robot_name]], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
-        else:
-            self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_tand_gerad.urdf", useFixedBase=True, basePosition=[0, 0, self.fixed_height[self.robot_name]], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
+            # load robot arm and set it to its default pose
+            # info: the welding torch is contained within the urdf file of the robot
+            # I tried to do this via a constraint connecting the end effector link with the torch loaded in as a separate urf
+            # this works, but one cannot then use the pybullet inverse kinematics method for the the tip of the torch
+            # because it relies on using a link within the robot urdf
+            if not self.tool:
+                self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_mrw510.urdf", useFixedBase=True, basePosition=[0, 0, self.fixed_height[self.robot_name]], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
+            else:
+                self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_tand_gerad.urdf", useFixedBase=True, basePosition=[0, 0, self.fixed_height[self.robot_name]], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
 
         joints = [pyb.getJointInfo(self.robot, i) for i in range(pyb.getNumJoints(self.robot))]
         self.joints = [j[0] for j in joints if j[2] == pyb.JOINT_REVOLUTE]
@@ -150,7 +152,9 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         # turn on rendering again
         pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
 
-        self.agent.state = 0
+        self.agent.path_state = 0
+        self.agent.plan = None
+        self.agent.objective = None
         
         obs, _, _, _ = self.step()  # return an observation of the environment without any actions taken
 
@@ -217,10 +221,11 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             
             pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)
             pyb.removeBody(self.robot)
-            if not self.tool:
-                self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_mrw510.urdf", useFixedBase=True, basePosition=[base_pos[0], base_pos[1], self.fixed_height[self.robot_name]], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
-            else:
-                self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_tand_gerad.urdf", useFixedBase=True, basePosition=[base_pos[0], base_pos[1], self.fixed_height[self.robot_name]], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
+            with suppress_stdout():
+                if not self.tool:
+                    self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_mrw510.urdf", useFixedBase=True, basePosition=[base_pos[0], base_pos[1], self.fixed_height[self.robot_name]], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
+                else:
+                    self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_tand_gerad.urdf", useFixedBase=True, basePosition=[base_pos[0], base_pos[1], self.fixed_height[self.robot_name]], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
             joints = [pyb.getJointInfo(self.robot, i) for i in range(pyb.getNumJoints(self.robot))]
             self.joints = [j[0] for j in joints if j[2] == pyb.JOINT_REVOLUTE]
             for i in range(len(self.joints)):
@@ -264,9 +269,9 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             state = self._get_obs()
             # unfortunately, the order of dict entries matters to the gym contains() method here
             # if somehow the order of dict entries in the observation space OrderedDict changes, then the order of the next lines defining the entries of the new state needs to be switched as well
-            new_ee_position = state[2:5] + action[2:5]
+            new_ee_position = state[2:5] + action[:3]
             current_rotation_as_rpy = pyb.getEulerFromQuaternion(state[5:9])
-            new_rotation_as_rpy = np.array([entry + action[:5][idx] for idx, entry in enumerate(current_rotation_as_rpy)])
+            new_rotation_as_rpy = np.array([entry + action[3:][idx] for idx, entry in enumerate(current_rotation_as_rpy)])
             new_rotation_as_quaternion = pyb.getQuaternionFromEuler(new_rotation_as_rpy)
             new_rotation_as_quaternion_in_correct_frame = self._quat_w_to_ee(new_rotation_as_quaternion)         
             # TODO: reimplement the valid bounds check once the bounds have actually been settled on sometime in the future
@@ -410,11 +415,12 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         Add objects to env.
         """
         pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)
-        obj_id = pyb.loadURDF(
-            urdf,
-            pose[0],  # xyz
-            pose[1],  # xyzw quaternion
-            useFixedBase=True)
+        with suppress_stdout():
+            obj_id = pyb.loadURDF(
+                urdf,
+                pose[0],  # xyz
+                pose[1],  # xyzw quaternion
+                useFixedBase=True)
         self.obj_ids.append(obj_id)
         pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
         return obj_id
@@ -523,11 +529,11 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
     def _init_gym_vars(self):
 
         # contains the position (as xyz) and rotation (as quaternion) of the end effector (i.e. the welding torch) in world frame
-        min_position = np.array([-0.2, -0.2, 0.001])  # provisional
-        max_position = np.array([6., 6., 1.25])
-        min_position_base = np.array([-0.2, -0.2]) 
-        max_position_base = np.array([6., 6.])
-        min_rotation = np.array([-1, -1, -1]) * np.pi * 2
+        min_position = np.array([0, 0, 0])  
+        max_position = np.array([5., 5., 2])
+        min_position_base = np.array([0, 0]) 
+        max_position_base = np.array([5., 5.])
+        min_rotation = np.array([-1, -1, -1]) * np.pi
         max_rotation = min_rotation * (-1)
         self.pos_speed = 0.01  # provisional
         self.base_speed = 10 * self.pos_speed

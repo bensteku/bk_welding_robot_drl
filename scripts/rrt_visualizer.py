@@ -6,13 +6,16 @@ sys.path.insert(1, os.path.join(sys.path[0], '..'))
 from util.planner import interpolate_path
 import matplotlib.pyplot as plt
 import open3d as o3d
+import meshio
+import plotly
+import plotly.graph_objects as go
 
 folder = "./scripts/saved_trees/"
 filename = "e870f74e-9a55-4629-a322-46bd956b0da6_0-68_1-22"
 mesh_folder = "./assets/objects/"
 meshfile = "201910204483_R1.obj"
 
-open3d_or_matplotlib = 0
+open3d_or_matplotlib = 2
 
 # pybullet stuff
 
@@ -75,7 +78,7 @@ for path in paths_1:
     interpolated_paths_1.append(interpolate_path(path, 5))
 
 # run forward kinematics to get the actual trajectories in cartesian space for both trees
-if not open3d_or_matplotlib:
+if open3d_or_matplotlib == 0 or open3d_or_matplotlib == 2:
     cartesian_paths_x_0 = []
     cartesian_paths_y_0 = []
     cartesian_paths_z_0 = []
@@ -146,7 +149,7 @@ if not open3d_or_matplotlib:
     ax.scatter([root_1_xyz[0]], [root_1_xyz[1]], [root_1_xyz[2]], color="blue", s=100, marker='x')
 
     plt.show()
-else:
+elif open3d_or_matplotlib == 1:
     # create a dataset of points and indices such that open3d can recognize these as lines
     points = []
     lines = []
@@ -162,7 +165,7 @@ else:
         for idx, point in enumerate(path[1:]):
             points.append(point)
             lines.append([idx, idx+1])
-            colors.append([0, 1, 0])
+            colors.append([0, 0, 1])
 
     elements = []
     mesh_model = o3d.io.read_triangle_mesh(mesh_folder+meshfile)
@@ -179,4 +182,84 @@ else:
     elements.append(mesh_model)
     elements.append(line_set)
     o3d.visualization.draw_geometries(elements)
+else:
+    mesh_model = meshio.read(mesh_folder+meshfile)
+    vertices = mesh_model.points * 0.0005
+    print(mesh_model.cells_dict)
+    triangles = mesh_model.cells_dict['triangle']
 
+    x, y, z = vertices.T
+    I, J, K = triangles.T
+
+    pl_mygrey=[0, 'rgb(153, 153, 153)'], [1., 'rgb(255,255,255)']
+                           
+    pl_mesh = go.Mesh3d(x=x,
+                        y=y,
+                        z=z,
+                        colorscale=pl_mygrey, 
+                        intensity= z,
+                        flatshading=True,
+                        i=I,
+                        j=J,
+                        k=K,
+                        name='welding mesh',
+                        showscale=False
+                        )
+
+    pl_mesh.update(cmin=-7,# atrick to get a nice plot (z.min()=-3.31909)
+               lighting=dict(ambient=0.18,
+                             diffuse=1,
+                             fresnel=0.1,
+                             specular=1,
+                             roughness=0.05,
+                             facenormalsepsilon=1e-15,
+                             vertexnormalsepsilon=1e-15),
+               lightposition=dict(x=100,
+                                  y=200,
+                                  z=0
+                                 )
+                      )
+    
+    lines_0 = []
+    for idx in range(len(cartesian_paths_x_0)):
+        lines_0.append(
+            go.Scatter3d(
+                x = cartesian_paths_x_0[idx],
+                y = cartesian_paths_y_0[idx],
+                z = cartesian_paths_z_0[idx],
+                mode = 'lines',
+                name = '',
+                line=dict(color= 'rgb(255,0,0)', width=1)
+            )
+        )
+
+    lines_1 = []
+    for idx in range(len(cartesian_paths_x_1)):
+        lines_1.append(
+            go.Scatter3d(
+                x = cartesian_paths_x_1[idx],
+                y = cartesian_paths_y_1[idx],
+                z = cartesian_paths_z_1[idx],
+                mode = 'lines',
+                name = '',
+                line=dict(color= 'rgb(0,255,0)', width=1)
+            )
+        )
+
+    layout = go.Layout(
+         title="welding mesh",
+         font=dict(size=16, color='white'),
+         width=700,
+         height=700,
+         scene_xaxis_visible=False,
+         scene_yaxis_visible=False,
+         scene_zaxis_visible=False,
+         paper_bgcolor='rgb(50,50,50)',
+         scene=dict(
+                 aspectmode='data'
+         )
+        )
+    
+    fig = go.Figure(data=[pl_mesh] + lines_0 + lines_1, layout=layout)
+
+    fig.show()

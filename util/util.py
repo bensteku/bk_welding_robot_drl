@@ -1,6 +1,9 @@
 import numpy as np
 import pybullet as pyb
 import pyquaternion as pyq
+import os
+import sys
+from contextlib import contextmanager
 
 def matrix_to_quaternion(matrix):
     """Utility method to get quaternion from a 3x3 rotation matrix
@@ -148,6 +151,9 @@ def exp_decay(x, max, zero_crossing):
     three_halfs = max * 1.5
     return three_halfs * np.exp((np.log(1./3.)/(zero_crossing))*x) - half
 
+def exp_decay_alt(x, max, half):
+    return max*np.exp((np.log(1/2)/half)*x)
+
 def rotate_vec(quat, vec):
     work_vec = np.array([vec[0], vec[1], vec[2], 0])
     return quaternion_multiply(quaternion_multiply(quat, work_vec), quaternion_invert(quat))[:3]
@@ -156,3 +162,22 @@ def cosine_similarity(vec1, vec2):
     norm = np.linalg.norm(vec1) * np.linalg.norm(vec2)
     return np.dot(vec1, vec2) / norm
     
+# taken from https://stackoverflow.com/questions/5081657/how-do-i-prevent-a-c-shared-library-to-print-on-stdout-in-python/17954769#17954769
+@contextmanager
+def suppress_stdout():
+    fd = sys.stdout.fileno()
+
+    def _redirect_stdout(to):
+        sys.stdout.close()  # + implicit flush()
+        os.dup2(to.fileno(), fd)  # fd writes to 'to' file
+        sys.stdout = os.fdopen(fd, "w")  # Python writes to fd
+
+    with os.fdopen(os.dup(fd), "w") as old_stdout:
+        with open(os.devnull, "w") as file:
+            _redirect_stdout(to=file)
+        try:
+            yield  # allow code to be run with the redirected stdout
+        finally:
+            _redirect_stdout(to=old_stdout)  # restore stdout.
+            # buffering and flags such as
+            # CLOEXEC may be different
