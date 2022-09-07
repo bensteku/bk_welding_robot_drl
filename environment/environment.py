@@ -264,7 +264,6 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             state = self._get_obs()
             # unfortunately, the order of dict entries matters to the gym contains() method here
             # if somehow the order of dict entries in the observation space OrderedDict changes, then the order of the next lines defining the entries of the new state needs to be switched as well
-            new_base_position = state[:2] + action[:2]
             new_ee_position = state[2:5] + action[2:5]
             current_rotation_as_rpy = pyb.getEulerFromQuaternion(state[5:9])
             new_rotation_as_rpy = np.array([entry + action[:5][idx] for idx, entry in enumerate(current_rotation_as_rpy)])
@@ -272,16 +271,35 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             new_rotation_as_quaternion_in_correct_frame = self._quat_w_to_ee(new_rotation_as_quaternion)         
             # TODO: reimplement the valid bounds check once the bounds have actually been settled on sometime in the future
 
-            # first move the base of the robot...(but only if the new location is sufficiently different from the old one to prevent constant)
-            if np.linalg.norm(new_base_position - state[:2]) > 1e-4:
-                pyb.resetBasePositionAndOrientation(self.robot, np.append(new_base_position, self.fixed_height[self.robot_name]), pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
-            # ...then the joints
+            # based on the information above, move the joints
             timeout = self.movep((new_ee_position, new_rotation_as_quaternion_in_correct_frame))
             if timeout:
                 return timeout
         
         while not self.is_static:
             pyb.stepSimulation()
+    
+    def move_base(self, new_base_pos, dynamic=True, delay = 0.05):
+        """
+        Method for moving the robot base to different coordinates.
+        Will return True if movement happened, False if not.
+        """
+        state = self._get_obs()
+        pos_diff = new_base_pos - state[:2]
+        pos_dist = np.linalg.norm(pos_diff)
+        if pos_dist > 1e-4:
+            if not dynamic:
+                pyb.resetBasePositionAndOrientation(self.robot, np.append(new_base_pos, self.fixed_height[self.robot_name]), pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
+                return True
+            else:
+                steps = int(pos_dist / self.base_speed)
+                step = pos_diff * (self.base_speed / pos_dist)
+                for i in range(steps):
+                    pyb.resetBasePositionAndOrientation(self.robot, np.append(state[:2] + (i+1)*step, self.fixed_height[self.robot_name]), pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
+                    time.sleep(delay)
+                pyb.resetBasePositionAndOrientation(self.robot, np.append(new_base_pos, self.fixed_height[self.robot_name]), pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
+                return True
+        return False
 
     # methods taken almost 1:1 from ravens code, need to add proper attribution later TODO
     def movej(self, targj, speed=0.05, timeout=0.025, use_dynamics=False):
@@ -524,10 +542,10 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         
         # actions consist of marginal (base-)translations and rotations
         # indices 0-1:base, 2-4: ee, 5-7: ee rotation in rpy
-        min_action = np.array([-1, -1, -1, -1, -1, -1, -1, -1 ]) #tbd
+        min_action = np.array([-1, -1, -1, -1, -1, -1 ]) #tbd
         max_action = min_action * -1
 
-        self.action_space = gym.spaces.Box(low=min_action, high=max_action, shape=(8,), dtype=np.float32)
+        self.action_space = gym.spaces.Box(low=min_action, high=max_action, shape=(6,), dtype=np.float32)
 
     def manual_control(self):
         # code to manually control the robot in real time
@@ -584,14 +602,9 @@ class WeldingEnvironmentPybulletConfigSpace(WeldingEnvironmentPybullet):
 
     def _perform_action(self, action):
         if action is not None:
-            state = self._get_obs()
-            new_base_position = state[:2] + action[:2]
-            new_joints = action[2:]        
+            new_joints = action       
 
-            # first move the base of the robot...(but only if the new location is sufficiently different from the old one to prevent constant)
-            if np.linalg.norm(new_base_position - state[0]) > 1e-4:
-                pyb.resetBasePositionAndOrientation(self.robot, np.append(new_base_position, self.fixed_height[self.robot_name]), pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
-            # ...then the joints
+            # move the joints
             timeout = self.movej(new_joints)
             if timeout:
                 return timeout

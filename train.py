@@ -27,12 +27,14 @@ for i_episode in range(num_episodes):
     
     for t in count():
 
-        # TODO: remove agent state 1, refactor code to account for that
-        # TODO: at save and load function to model
+        # TODO: add save and load function to model
         # TODO: look over model code again to ensure it actually works
         # TODO: look at rewards again
         # TODO: investigate whether it's possible to turn on rendering mid-session
 
+        agent.update_objectives()
+        if agent.state !=2 and env.move_base(agent.objective[4]):
+            state_old = agent._get_obs()
         action = agent.act(torch.from_numpy(state_old).to(agent.model.device))
 
         _, reward, done, _ = env.step(action)

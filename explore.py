@@ -18,6 +18,9 @@ a.goals = a.goals[18:]
 #input("dodo")
 
 while not False:
+    a.update_objectives()
+    if a.state !=2 and e.move_base(a.objective[4]):
+        obs = e._get_obs()
     act = a.act(obs)
     #print(e._get_obs())
     print("agent state")
