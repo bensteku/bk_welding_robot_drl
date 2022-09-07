@@ -13,6 +13,8 @@ index = agent.dataset["filenames"].index("201910204483_R1.urdf")
 
 memory = ReplayMemory(10000)
 
+agent.model.load_model("./model/weights/2022-09-07-16-59-46.pt")
+
 num_episodes = 1500
 batch_size = 150
 cutoff = batch_size * 10
@@ -27,7 +29,6 @@ for i_episode in range(num_episodes):
     
     for t in count():
 
-        # TODO: add save and load function to model
         # TODO: look over model code again to ensure it actually works
         # TODO: look at rewards again
         # TODO: investigate whether it's possible to turn on rendering mid-session
@@ -45,14 +46,18 @@ for i_episode in range(num_episodes):
         else:
             state_new = None
 
-        memory.push(state_old, action[2:], state_new, reward) #ignore the base movement part of the action for the purposes of the NN
+        memory.push(state_old, action, state_new, reward)
         #print(reward)
 
         state_old = state_new
 
         agent.model.optimize(batch_size, memory, 0.99)
+        if agent.model.optimization_steps % 2000 == 1:
+            agent.model.save_model()
+            print("Saving model, "+str(agent.model.optimization_steps)+" optimization steps so far.")
         if done or t > cutoff or (t > 50 and np.mean(reward_buffer) < 0):
             episode_durations.append(t+1)
+            print("Episode done, "+str(len(episode_durations))+" episodes this session so far.")
             break
 
 env.close()

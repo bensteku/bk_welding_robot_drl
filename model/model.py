@@ -7,6 +7,7 @@ from model.net import SimpleNeuralNet, ActorNet, CriticNet
 from collections import OrderedDict, namedtuple, deque
 from util.util import quaternion_multiply
 import random
+from datetime import datetime
 
 # wrapper class for Pytorch model of the agent
 # inspired by the architecture of MeshCNN
@@ -29,6 +30,8 @@ class AgentModel:
         if self.train:
             self.optimizer = torch.optim.Adam()  # TODO
         
+        self.optimization_steps = 0
+        
     def forward(self, ee_pos, ee_rot, base_pos, joints, weld_seam, weld_seam_normals, robot_state):
         return self.net(self.welding_mesh, ee_pos, ee_rot, base_pos, joints, weld_seam, weld_seam_normals, robot_state)
 
@@ -43,6 +46,7 @@ class AgentModel:
         out = self.forward()
         self.backward(out)
         self.optimizer.step()
+        self.optimization_steps += 1
 
 class AgentModelSimple(AgentModel):
 
@@ -64,6 +68,8 @@ class AgentModelSimple(AgentModel):
 
         self.optimizations = 0
         self.training = True
+
+
 
     def choose_action(self, state):
         self.actor.eval()
@@ -109,6 +115,11 @@ class AgentModelSimple(AgentModel):
         actor_loss.backward()
         self.actor.optimizer.step()
 
+        # save these in class variables for the saving method
+        self.acctor_loss = actor_loss
+        self.critic_loss = critic_loss
+        self.optimization_steps += 1
+
         self.soft_update(self.t_actor, self.actor)
         self.soft_update(self.t_critic, self.critic)
 
@@ -117,6 +128,28 @@ class AgentModelSimple(AgentModel):
             target_param.data.copy_(
                 target_param.data * (1.0 - tau) + param.data * tau
             )
+
+    def save_model(self):
+        save_dict = {
+            'step': self.optimization_steps,
+            'critic_state_dict': self.critic.state_dict(),
+            'actor_state_dict': self.actor.state_dict(),
+            'critic_loss': self.critic_loss,
+            'actor_loss': self.acctor_loss
+        }
+        timestamp = str(datetime.now()).split(".")[0].replace(" ","-").replace(":","-") # string splicing to make the date work as a file name
+        path = "./model/weights/"+ timestamp +".pt"
+        torch.save(save_dict, path)
+    
+    def load_model(self, path):
+        checkpoint = torch.load(path)
+
+        self.actor.load_state_dict(checkpoint["actor_state_dict"])
+        self.t_actor.load_state_dict(checkpoint["actor_state_dict"])
+        self.critic.load_state_dict(checkpoint["critic_state_dict"])
+        self.t_critic.load_state_dict(checkpoint["critic_state_dict"])
+        self.optimization_steps = checkpoint["step"]
+
 
 class ReplayMemory(object):
 
