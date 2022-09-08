@@ -12,6 +12,8 @@ class WeldingEnvironment(gym.Env):
         
         self._random_state = None
 
+        # method to clean up the constructor, sets a bunch of class variables with hardoced values used for many calculations, implemented by subclass
+        self._init_settings()  
         # variables needed by Gym env subclasses, set by method to be implemented by subclasses
         self._init_gym_vars()
 
@@ -59,6 +61,10 @@ class WeldingEnvironment(gym.Env):
 
         raise NotImplementedError
 
+    def _init_settings(self):
+
+        raise NotImplementedError
+
     def _init_gym_vars(self):
 
         raise NotImplementedError
@@ -89,7 +95,6 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                 hz=240,
                 robot="ur5"):
 
-        super().__init__(agent)
 
         self.asset_files_path = asset_files_path
         self.obj_ids = []  # list of object ids
@@ -99,7 +104,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         else:
             raise ValueError("Robot model not supported")
 
-        self._init_settings()  # method to clean up the constructor, sets a bunch of class variables with hardoced values used for many calculations
+        super().__init__(agent)
         
         # pybullet connection and setup
         disp = pyb.DIRECT  # direct <-> no gui, use for training
@@ -127,22 +132,22 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)
 
         # load in the meshes, the function here supresses the pointless pybullet warnings
-        with suppress_stdout():
-            # load ground plane to hold objects in place
-            plane_id = pyb.loadURDF("workspace/plane.urdf", basePosition=[0, 0, -0.001])
-            self.obj_ids.append(plane_id)
+        #with suppress_stdout():
+        # load ground plane to hold objects in place
+        plane_id = pyb.loadURDF("workspace/plane.urdf", basePosition=[0, 0, -0.001])
+        self.obj_ids.append(plane_id)
 
-            # TODO: load in welding table
+        # TODO: load in welding table
 
-            # load robot arm and set it to its default pose
-            # info: the welding torch is contained within the urdf file of the robot
-            # I tried to do this via a constraint connecting the end effector link with the torch loaded in as a separate urf
-            # this works, but one cannot then use the pybullet inverse kinematics method for the the tip of the torch
-            # because it relies on using a link within the robot urdf
-            if not self.tool:
-                self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_mrw510.urdf", useFixedBase=True, basePosition=[0, 0, self.fixed_height[self.robot_name]], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
-            else:
-                self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_tand_gerad.urdf", useFixedBase=True, basePosition=[0, 0, self.fixed_height[self.robot_name]], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
+        # load robot arm and set it to its default pose
+        # info: the welding torch is contained within the urdf file of the robot
+        # I tried to do this via a constraint connecting the end effector link with the torch loaded in as a separate urf
+        # this works, but one cannot then use the pybullet inverse kinematics method for the the tip of the torch
+        # because it relies on using a link within the robot urdf
+        if not self.tool:
+            self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_mrw510.urdf", useFixedBase=True, basePosition=[0, 0, self.fixed_height[self.robot_name]], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
+        else:
+            self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_tand_gerad.urdf", useFixedBase=True, basePosition=[0, 0, self.fixed_height[self.robot_name]], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
 
         joints = [pyb.getJointInfo(self.robot, i) for i in range(pyb.getNumJoints(self.robot))]
         self.joints = [j[0] for j in joints if j[2] == pyb.JOINT_REVOLUTE]
@@ -172,7 +177,33 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                             linkIndex=self.base_link_id[self.robot_name],
                             computeForwardKinematics=True  # need to check if this is necessary, if not can be turned off for performance gain
             )
-        return np.hstack([np.array(tmp2[4][:2]), np.array(tmp[0]), self._quat_ee_to_w(np.array(tmp[1])), self.get_joint_state()]) 
+        if self.agent.objective:
+            state = np.hstack((np.array(tmp2[4][:2]), np.array(tmp[0]), pyb.getEulerFromQuaternion(self._quat_ee_to_w(np.array(tmp[1]))), self.get_joint_state(), self.agent.objective[0], self.agent.objective[1][0], self.agent.objective[1][1], [self.agent.path_state])).astype(np.float32)
+        else:
+            state = np.hstack((np.array(tmp2[4][:2]), np.array(tmp[0]), pyb.getEulerFromQuaternion(self._quat_ee_to_w(np.array(tmp[1]))), self.get_joint_state(), [0, 0, 0], [1, 0, 0], [1, 0, 0], [self.agent.path_state])).astype(np.float32)
+        return state
+
+    def normalize_obs(self, obs):
+        """
+        Method to normalize the state such that the inputs for the NN are between -1 and 1
+        Expects a numpy array, not a pytorch tensor
+        """
+        low = self.observation_space.low
+        high = self.observation_space.high
+        # both base position and ee position can be expressed as a percentage of their upper bound by simple division with it
+        # this works as long as the lower bound stays at 0
+        normalized_base_position = obs[:2] / high[:2]  # element-wise division
+        normalized_ee_position = obs[2:5] / high[2:5]
+        # the rpy values are projected to between -1 and 1 with max and min values being pi and -pi
+        normalized_rpy = 2 * ((obs[5:8] + np.ones(3) * np.pi) / (np.ones(3) * 2 * np.pi)) - np.ones(3) # -(-)pi/(pi-(-)pi), standard lower-upper-bound formula
+        # the joint values are normalized via the saved joint limits
+        normalized_joints = 2 * ((obs[8:14] - self.joints_lower[self.robot_name]) / (self.joints_range[self.robot_name])) - np.ones(6)
+        # the objective position needs to be normalized via the upper bound as above with the ee, the norms are already normalized
+        normalized_objective_position = obs[14:17] / high[2:5]
+        # finally, the agent path state can be normalized by dividing by 2, as there are only 3 states
+        normalized_agent_path_state = obs[23] / 2
+
+        return np.hstack([normalized_base_position, normalized_ee_position, normalized_rpy, normalized_joints, normalized_objective_position, obs[17:23], normalized_agent_path_state])
 
     def close(self):
 
@@ -221,11 +252,11 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             
             pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)
             pyb.removeBody(self.robot)
-            with suppress_stdout():
-                if not self.tool:
-                    self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_mrw510.urdf", useFixedBase=True, basePosition=[base_pos[0], base_pos[1], self.fixed_height[self.robot_name]], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
-                else:
-                    self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_tand_gerad.urdf", useFixedBase=True, basePosition=[base_pos[0], base_pos[1], self.fixed_height[self.robot_name]], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
+            #with suppress_stdout():
+            if not self.tool:
+                self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_mrw510.urdf", useFixedBase=True, basePosition=[base_pos[0], base_pos[1], self.fixed_height[self.robot_name]], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
+            else:
+                self.robot = pyb.loadURDF(self.robot_name+"/"+self.robot_name+"_tand_gerad.urdf", useFixedBase=True, basePosition=[base_pos[0], base_pos[1], self.fixed_height[self.robot_name]], baseOrientation=pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
             joints = [pyb.getJointInfo(self.robot, i) for i in range(pyb.getNumJoints(self.robot))]
             self.joints = [j[0] for j in joints if j[2] == pyb.JOINT_REVOLUTE]
             for i in range(len(self.joints)):
@@ -284,7 +315,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         while not self.is_static:
             pyb.stepSimulation()
     
-    def move_base(self, new_base_pos, dynamic=True, delay = 0.05):
+    def move_base(self, new_base_pos, dynamic=True, delay = 0):
         """
         Method for moving the robot base to different coordinates.
         Will return True if movement happened, False if not.
@@ -301,7 +332,8 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                 step = pos_diff * (self.base_speed / pos_dist)
                 for i in range(steps):
                     pyb.resetBasePositionAndOrientation(self.robot, np.append(state[:2] + (i+1)*step, self.fixed_height[self.robot_name]), pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
-                    time.sleep(delay)
+                    if delay:
+                        time.sleep(delay)
                 pyb.resetBasePositionAndOrientation(self.robot, np.append(new_base_pos, self.fixed_height[self.robot_name]), pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
                 return True
         return False
@@ -375,7 +407,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             upperLimits=self.joints_upper[self.robot_name],
             jointRanges=self.joints_range[self.robot_name],
             restPoses=np.float32(self.resting_pose_angles[self.robot_name]).tolist(),
-            maxNumIterations=2000,
+            maxNumIterations=50,
             residualThreshold=5e-3)
         joints = np.float32(joints)
         joints[2:] = (joints[2:] + np.pi) % (2 * np.pi) - np.pi
@@ -415,12 +447,12 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         Add objects to env.
         """
         pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)
-        with suppress_stdout():
-            obj_id = pyb.loadURDF(
-                urdf,
-                pose[0],  # xyz
-                pose[1],  # xyzw quaternion
-                useFixedBase=True)
+        #with suppress_stdout():
+        obj_id = pyb.loadURDF(
+            urdf,
+            pose[0],  # xyz
+            pose[1],  # xyzw quaternion
+            useFixedBase=True)
         self.obj_ids.append(obj_id)
         pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
         return obj_id
@@ -526,25 +558,32 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             "kr6": [[0, 0, 0, 1], [0, 0, 0, 1]]  # tbd
         }
 
-    def _init_gym_vars(self):
-
-        # contains the position (as xyz) and rotation (as quaternion) of the end effector (i.e. the welding torch) in world frame
-        min_position = np.array([0, 0, 0])  
-        max_position = np.array([5., 5., 2])
-        min_position_base = np.array([0, 0]) 
-        max_position_base = np.array([5., 5.])
-        min_rotation = np.array([-1, -1, -1]) * np.pi
-        max_rotation = min_rotation * (-1)
         self.pos_speed = 0.01  # provisional
         self.base_speed = 10 * self.pos_speed
 
-        self.observation_space = gym.spaces.Dict(
-            {
-                'position': gym.spaces.Box(low=min_position, high=max_position, shape=(3,), dtype=np.float32),
-                'base_position': gym.spaces.Box(low=min_position_base, high=max_position_base, shape=(2,), dtype=np.float32),
-                'rotation': gym.spaces.Box(low=min_rotation, high=max_rotation, shape=(3,), dtype=np.float32)
-            }
-        )
+    def _init_gym_vars(self):
+
+        # observation space and its limits
+        # contains the position (as xyz) and rotation (as quaternion) of the end effector (i.e. the welding torch) in world frame
+        min_position_base = np.array([0, 0]) 
+        max_position_base = np.array([5., 5.])
+        min_position = np.array([0, 0, 0])  
+        max_position = np.array([5., 5., 2])
+        min_rotation = np.array([-1, -1, -1]) * np.pi
+        max_rotation = min_rotation * (-1)
+        min_joints = self.joints_lower[self.robot_name]
+        max_joints = self.joints_upper[self.robot_name]
+        min_objective_position = min_position
+        max_objective_position = max_position
+        min_norms = np.zeros(6)
+        max_norms = np.ones(6)
+        min_agent_path_state = 0
+        max_agent_path_state = 2
+
+        low = np.hstack([min_position_base, min_position, min_rotation, min_joints, min_objective_position, min_norms, min_agent_path_state]).astype(np.float32)
+        high = np.hstack([max_position_base, max_position, max_rotation, max_joints, max_objective_position, max_norms, max_agent_path_state]).astype(np.float32)
+
+        self.observation_space = gym.spaces.Box(low=low, high=high, shape=(24,), dtype=np.float32)
         
         # actions consist of marginal (base-)translations and rotations
         # indices 0-1:base, 2-4: ee, 5-7: ee rotation in rpy

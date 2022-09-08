@@ -109,19 +109,6 @@ class AgentPybullet(Agent):
         self._set_plan()
         self._set_objective()
 
-    def _get_obs(self):
-        """
-        Returns the an observation of the agent (in reference to the env's observation).
-        This consists of an observation of the environment and the agent's current objective.
-        Arranged in such a way that it's convenient for usage with PyTorch.
-        """
-        obs = self.env._get_obs()
-        if self.objective:
-            state = np.hstack((obs[:2], obs[2:5], pyb.getEulerFromQuaternion(obs[5:9]), obs[9:], self.objective[0], self.objective[1][0], self.objective[1][1], [self.path_state]))
-        else:
-            state = np.hstack((obs[:2], obs[2:5], pyb.getEulerFromQuaternion(obs[5:9]), obs[9:], [0, 0, 0], [1, 0, 0], [1, 0, 0], [self.path_state]))
-        return state
-
     def _register_data(self):
         """
         Scans URDF(obj) files in asset path and creates a list, associating file name with weld seams and ground truths.
@@ -288,33 +275,6 @@ class AgentPybulletNN(AgentPybullet):
         action = action_tensor.cpu().detach().numpy()
 
         return action
-
-    def normalize_state(self, agent_state):
-        """
-        Method to normalize the state such that the inputs for the NN are between -1 and 1
-        Expects a numpy array, not a pytorch tensor
-        """
-        # both base position and ee position can be expressed as a percentage of their upper bound by simple division with it
-        # this works as long as the lower bound stays at 0
-        normalized_base_position = agent_state[:2] / self.env.observation_space.spaces["base_position"].high  # element-wise division
-        normalized_ee_position = agent_state[2:5] / self.env.observation_space.spaces["position"].high 
-        # the rpy values are projected to between -1 and 1 with max and min values being pi and -pi
-        normalized_rpy = 2 * ((agent_state[5:8] + np.ones(3) * np.pi) / (np.ones(3) * 2 * np.pi)) - np.ones(3) # -(-)pi/(pi-(-)pi), standard lower-upper-bound formula
-        # the joint values are normalized via the saved joint limits
-        normalized_joints = 2 * ((agent_state[8:14] - self.env.joints_lower[self.env.robot_name]) / (self.env.joints_range[self.env.robot_name])) - np.ones(6)
-        # the objective position needs to be normalized via the upper bound as above with the ee, the norms are already normalized
-        normalized_objective_position = agent_state[14:17] / self.env.observation_space.spaces["position"].high
-        # finally, the agent path state can be normalized by dividing by 2, as there are only 3 states
-        normalized_agent_path_state = agent_state[23] / 2
-
-        return np.hstack([normalized_base_position, normalized_ee_position, normalized_rpy, normalized_joints, normalized_objective_position, agent_state[17:23], normalized_agent_path_state])
-
-
-    def denormalize_state(self, normalized_state):
-        """
-        Method to restore a normalized state to its actual dimensions in Pybullet
-        """
-        pass  # TBD if even needed
 
 class AgentPybulletRRTPlanner(AgentPybullet):
     """

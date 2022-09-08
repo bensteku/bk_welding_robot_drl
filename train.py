@@ -7,14 +7,14 @@ import numpy as np
 from collections import deque
 
 agent = AgentPybulletNN("./assets/objects/")
-env = WeldingEnvironmentPybullet(agent, "./assets/", True, robot="kr16")
+env = WeldingEnvironmentPybullet(agent, "./assets/", False, robot="kr16")
 
 index = agent.dataset["filenames"].index("201910204483_R1.urdf")
 
 memory = ReplayMemory(100000)
 
 weights_folder = "./model/weights/"
-weight_file = "c08e577e-eb65-4276-9bd7-a43e80c2f937_255000.pt"
+weight_file = "744c9069-4866-4f38-897f-292d9c908a73_30000.pt"
 
 agent.model.load_model(weights_folder + weight_file)
 restart = True
@@ -29,8 +29,7 @@ episode_durations = []
 for i_episode in range(num_episodes):
     env.reset()
     agent.load_object_into_env(index)
-    state_old = agent._get_obs()
-    state_old = agent.normalize_state(state_old)
+    state_old = env.normalize_obs(env._get_obs())
     reward_buffer = deque(maxlen=50)
     
     for t in count():
@@ -40,16 +39,14 @@ for i_episode in range(num_episodes):
 
         agent.update_objectives()
         if agent.path_state !=2 and env.move_base(agent.objective[4]):
-            state_old = agent._get_obs()
-            state_old = agent.normalize_state(state_old)
+            state_old = env.normalize_obs(env._get_obs())
         action = agent.act(torch.from_numpy(state_old).to(agent.model.device))
 
         _, reward, done, _ = env.step(action)
         reward_buffer.append(reward)
 
         if not done:
-            state_new = agent._get_obs()
-            state_new = agent.normalize_state(state_new)
+            state_new = env.normalize_obs(env._get_obs())
             memory.push(state_old, action, state_new, reward)
             state_old = state_new
 
