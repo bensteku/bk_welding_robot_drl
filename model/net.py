@@ -65,7 +65,7 @@ class ActorNet(nn.Module):
             res = torch.tanh(res)
             res_mod = res.clone()
             res_mod[:3] = res[:3] * 0.1
-            res_mod[3:] = res[3:] * 0.001
+            res_mod[3:] = res[3:] * 0.1
 
             return res_mod
 

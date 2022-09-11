@@ -1,35 +1,32 @@
 from itertools import count
 import torch
-from environment.environment import WeldingEnvironmentPybullet
+from environment.environment import WeldingEnvironmentPybullet, WeldingEnvironmentPybulletConfigSpace
 from agent.agent import AgentPybulletNN
 from model.model import AgentModelSimple, ReplayMemory
 import numpy as np
 from collections import deque
 
-agent = AgentPybulletNN("./assets/objects/")
-env = WeldingEnvironmentPybullet(agent, "./assets/", False, robot="kr16")
-
-index = agent.dataset["filenames"].index("201910204483_R1.urdf")
+agent = AgentPybulletNN()
+env = WeldingEnvironmentPybulletConfigSpace(agent, "./assets/", True, robot="kr16", additive=True)
 
 memory = ReplayMemory(100000)
 
 weights_folder = "./model/weights/"
 weight_file = "744c9069-4866-4f38-897f-292d9c908a73_30000.pt"
 
-agent.model.load_model(weights_folder + weight_file)
+#agent.model.load_model(weights_folder + weight_file)
 restart = True
 
 save_every_optimization_step = 15000
 num_episodes = 15000
 batch_size = 450
-cutoff = batch_size * 10
+cutoff = batch_size * 1
 target_update = 5
 episode_durations = []
 
 for i_episode in range(num_episodes):
     env.reset()
-    agent.load_object_into_env(index)
-    state_old = env.normalize_obs(env._get_obs())
+    state_old = env._get_obs()
     reward_buffer = deque(maxlen=50)
     
     for t in count():
@@ -37,18 +34,22 @@ for i_episode in range(num_episodes):
         # TODO: look at rewards again
         # TODO: add fancy parameter parser for script options
 
-        agent.update_objectives()
-        if agent.path_state !=2 and env.move_base(agent.objective[4]):
-            state_old = env.normalize_obs(env._get_obs())
         action = agent.act(torch.from_numpy(state_old).to(agent.model.device))
 
-        _, reward, done, _ = env.step(action)
+        state_new , reward, done, _ = env.step(action)
         reward_buffer.append(reward)
-
-        if not done:
-            state_new = env.normalize_obs(env._get_obs())
-            memory.push(state_old, action, state_new, reward)
-            state_old = state_new
+        """
+        print("state old")
+        print(state_old)
+        print("state_new")
+        print(state_new)
+        print("action")
+        print(action)
+        print("reward")
+        print(reward)
+        """
+        memory.push(state_old, action, state_new, reward)
+        state_old = state_new
 
         restart = not agent.model.optimize(batch_size, memory, 0.99)
         if agent.model.optimization_steps % save_every_optimization_step == 0 and not restart:

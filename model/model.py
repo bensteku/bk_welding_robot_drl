@@ -57,7 +57,7 @@ class AgentModelSimple(AgentModel):
 
         self.action_scale_factor = 0.001
 
-        sizes = [128, 128]
+        sizes = [36,36,128,128,256,128,36]
         # input size: 2 for base position, 3 for ee position, 3 for ee rpy, 6 for joint state, 3 for objective position, 3 for norm1, 3 for norm2, 1 for agent state = 23 inputs
         # output size: 3 for ee movement, 3 for ee rpy change = 6 outputs
         self.actor = ActorNet(24, 6, sizes).to(self.device)

@@ -2,91 +2,12 @@ import gym
 import pybullet as pyb
 import time
 import numpy as np
-from util.util import matrix_to_quaternion, quaternion_diff, quaternion_normalize, rpy_to_quaternion, quaternion_to_rpy, quaternion_multiply, quaternion_invert, suppress_stdout
+from util.util import quaternion_multiply, quaternion_invert, suppress_stdout, matrix_to_quaternion, exp_decay_alt, quaternion_similarity
+from util import xml_parser
+import os
 from collections import OrderedDict
 
-class WeldingEnvironment(gym.Env):
-
-    def __init__(self, 
-                agent):
-        
-        self._random_state = None
-
-        # method to clean up the constructor, sets a bunch of class variables with hardoced values used for many calculations, implemented by subclass
-        self._init_settings()  
-        # variables needed by Gym env subclasses, set by method to be implemented by subclasses
-        self._init_gym_vars()
-
-        # agent
-        self.agent = agent
-        self.agent._set_env(self)
-
-    #####################################################
-    # methods for Gym subclass, left as virtual methods #
-    #####################################################
-
-    def seed(self, seed=None):
-        self._random_state = np.random.RandomState(seed)
-        return self._random_state
-
-    def reset(self):
-
-        raise NotImplementedError
-        
-    def _get_obs(self):
-
-        raise NotImplementedError
-
-    def step(self, action=None):
-
-        timeout = self._perform_action(action)
-        
-        obs = self._get_obs()
-
-        reward, success, done = self.agent.reward(obs, timeout) if action is not None else (0, False, False)
-        if success:
-            self.agent.next_state()
-
-        return obs, reward, done, success
-
-    def close(self):
-
-        raise NotImplementedError
-
-    #################
-    # other methods #
-    #################
-
-    def _perform_action(self):
-
-        raise NotImplementedError
-
-    def _init_settings(self):
-
-        raise NotImplementedError
-
-    def _init_gym_vars(self):
-
-        raise NotImplementedError
-
-    def is_done(self):
-
-        raise NotImplementedError
-
-    def set_agent(self, agent):
-
-        self.agent = agent
-
-class WeldingEnvironmentMOSES(WeldingEnvironment):
-
-    def __init__(self,
-                agent,
-                asset_files_path):
-
-        self.asset_files_path = asset_files_path
-        super().__init__(agent)
-
-class WeldingEnvironmentPybullet(WeldingEnvironment):
+class WeldingEnvironmentPybullet(gym.Env):
 
     def __init__(self,
                 agent,
@@ -94,7 +15,6 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                 display=False,
                 hz=240,
                 robot="ur5"):
-
 
         self.asset_files_path = asset_files_path
         self.obj_ids = []  # list of object ids
@@ -104,7 +24,25 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         else:
             raise ValueError("Robot model not supported")
 
-        super().__init__(agent)
+        # method to clean up the constructor, sets a bunch of class variables with hardoced values used for many calculations, implemented by subclass
+        self._init_settings()  
+        # variables needed by Gym env subclasses, set by method to be implemented by subclasses
+        self._init_gym_vars()
+
+        # agent, used as an abstraction for the act method
+        # could also simply be implemented as part of this class
+        self.agent = agent
+        self.agent._set_env(self)
+
+        # path state variable, 0: moving ee down to weld seam, 1: welding, 2: moving ee back up
+        self.path_state = 0
+
+        # goals: overall collection of weldseams that are left to be dealt with
+        # plan: expansion of intermediate steps containted within one weldseam
+        # objective: the next part of the plan    
+        self.goals = []
+        self.objective = None
+        self.plan = None
         
         # pybullet connection and setup
         disp = pyb.DIRECT  # direct <-> no gui, use for training
@@ -115,6 +53,12 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         pyb.setTimeStep(1. / hz)
         pyb.setAdditionalSearchPath(self.asset_files_path)
 
+        # get dataset of meshes
+        self.dataset = self._register_data()
+
+        # set index of welding mesh that is to be loaded in
+        self.data_index = self.dataset["filenames"].index("201910204483_R1.urdf")  # TODO: replace by 0 and add a function for random choice from all indices after done signal was sent
+
         # set up the scene into the initial state
         self.reset()
 
@@ -122,11 +66,24 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
     # Gym methods #
     ###############
 
+    def step(self, action=None):
+
+        self._perform_action(action)
+        
+        obs = self._get_obs(False)
+
+        reward, success, done = self.reward(obs) if action is not None else (0, False, False)
+        if success:
+            self.next_state()
+        self.update_objectives()
+
+        return self._normalize_obs(obs), reward, done, success
+
     def reset(self):
 
         self.obj_ids = []
         pyb.resetSimulation(pyb.RESET_USE_DEFORMABLE_WORLD)
-        pyb.setGravity(0, 0, -9.8)
+        pyb.setGravity(0, 0, 0)
 
         # disable rendering for performance, becomes especially relevant if reset is called over and over again
         pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)
@@ -137,7 +94,8 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         plane_id = pyb.loadURDF("workspace/plane.urdf", basePosition=[0, 0, -0.001])
         self.obj_ids.append(plane_id)
 
-        # TODO: load in welding table
+        # load in the welding part and set goals
+        self.load_object_into_env(self.data_index)
 
         # load robot arm and set it to its default pose
         # info: the welding torch is contained within the urdf file of the robot
@@ -157,15 +115,18 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         # turn on rendering again
         pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
 
-        self.agent.path_state = 0
-        self.agent.plan = None
-        self.agent.objective = None
+        # reset path state and get new plan and objective
+        # also moves the base into position via the plan update in update_objectives()
+        self.path_state = 0
+        self.plan = None
+        self.objective = None
+        self.update_objectives()
         
         obs, _, _, _ = self.step()  # return an observation of the environment without any actions taken
 
         return obs
 
-    def _get_obs(self):
+    def _get_obs(self, normalize=True):
 
         tmp = pyb.getLinkState(
                             bodyUniqueId=self.robot,
@@ -177,13 +138,15 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
                             linkIndex=self.base_link_id[self.robot_name],
                             computeForwardKinematics=True  # need to check if this is necessary, if not can be turned off for performance gain
             )
-        if self.agent.objective:
-            state = np.hstack((np.array(tmp2[4][:2]), np.array(tmp[0]), pyb.getEulerFromQuaternion(self._quat_ee_to_w(np.array(tmp[1]))), self.get_joint_state(), self.agent.objective[0], self.agent.objective[1][0], self.agent.objective[1][1], [self.agent.path_state])).astype(np.float32)
+        if self.objective:
+            state = np.hstack((np.array(tmp2[4][:2]), np.array(tmp[0]), pyb.getEulerFromQuaternion(self._quat_ee_to_w(np.array(tmp[1]))), self.get_joint_state(), self.objective[0], self.objective[1][0], self.objective[1][1], [self.path_state])).astype(np.float32)
         else:
-            state = np.hstack((np.array(tmp2[4][:2]), np.array(tmp[0]), pyb.getEulerFromQuaternion(self._quat_ee_to_w(np.array(tmp[1]))), self.get_joint_state(), [0, 0, 0], [1, 0, 0], [1, 0, 0], [self.agent.path_state])).astype(np.float32)
+            state = np.hstack((np.array(tmp2[4][:2]), np.array(tmp[0]), pyb.getEulerFromQuaternion(self._quat_ee_to_w(np.array(tmp[1]))), self.get_joint_state(), [0, 0, 0], [1, 0, 0], [1, 0, 0], [self.path_state])).astype(np.float32)
+        if normalize:
+            state = self._normalize_obs(state)
         return state
 
-    def normalize_obs(self, obs):
+    def _normalize_obs(self, obs):
         """
         Method to normalize the state such that the inputs for the NN are between -1 and 1
         Expects a numpy array, not a pytorch tensor
@@ -209,9 +172,94 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
 
         pyb.disconnect()
 
-    #################################################
-    # methods for dealing with pybullet environment #
-    #################################################
+    ####################################################################
+    # methods for dealing with pybullet environment and the simulation #
+    ####################################################################
+
+    def reward(self, obs=None):
+        """
+        Method for calculating the rewards.
+        Args:
+            - obs: env observation
+        Returns:
+            - reward as float number
+            - boolean indicating if the objectives for the current state have been fulfilled
+        """
+        
+        # bool flags for when the objective is achieved
+        pos_done, rot_done = False, False
+        # base reward
+        reward = 0
+
+        if self.path_state == 2:
+            # state for moving the ee upwards after one line has been welded
+
+            # simply measure distance up to safe height
+            distance = np.linalg.norm(np.array([obs[2], obs[3], self.safe_height]) - obs[2:5]) 
+            if distance < self.ee_pos_reward_thresh:
+                reward += 1
+                pos_done = True
+                rot_done = True
+            else:
+                reward += exp_decay_alt(distance, 1, 2*self.ee_pos_reward_thresh)
+                #reward += 10 - distance * 2.5
+        else:
+            # if the arm is in welding mode or moving to the start position for welding give out a reward in concordance to how far away it is from the desired position and how closely
+            # it matches the ground truth rotation
+            # if the robot is in a problematic configuration (collision or not reachable(timeout)) give out a negative reward
+            objective_with_slight_offset = self.objective[0] + self.objective[1][0] * 0.01 + self.objective[1][1] * 0.01
+            distance = np.linalg.norm(objective_with_slight_offset - obs[2:5]) 
+            
+            if distance < self.ee_pos_reward_thresh:
+                reward += 1
+                pos_done = True  # objective achieved
+            else:
+                reward += exp_decay_alt(distance, 1, 2*self.ee_pos_reward_thresh)
+                #reward += 20 - distance * 2.5
+
+            quat_sim = quaternion_similarity(self.objective[2], obs[5:9])    
+            if quat_sim > 1-self.quat_sim_thresh:
+                rot_done = True
+            
+            reward = reward * (quat_sim**0.5)  # take root of quaternion similarity to dampen its effect a bit
+
+        # hand out penalties
+        col = self.is_in_collision()
+        if col and not (pos_done and rot_done):
+            reward = -1
+            pos_done = False
+            rot_done = False
+        elif col and (pos_done and rot_done):
+            col = False 
+
+        if pos_done and rot_done:
+            self.objective = None
+
+        
+
+        success = (pos_done and rot_done) and not col
+        done = (self.objective is None and len(self.plan)==0 and len(self.goals)==0) or col
+
+        return reward, success, done
+
+    def next_state(self):
+        """
+        Method that iterates the state of the agent. Called from outside if certain goal conditions are fulfilled.
+        """
+
+        # if the robot is in state 0 or 1 an objective has been completed
+        if self.path_state == 0 or self.path_state == 1:
+            self.objective = None
+        # if the robot is in state 1 and the plan is not empty yet, that means it should remain in state 1
+        # because it has more linear welding steps to complete
+        if self.path_state == 1 and len(self.plan) != 0:
+            return self.path_state
+        else:
+            # otherwise it's in another state or it's in state 1 but there's currently no more welding to be done,
+            # then increment state or wrap back around if in state 2
+            self.path_state = self.path_state + 1 if self.path_state < 2 else 0
+
+        return self.path_state
 
     def get_joint_state(self):
         """
@@ -246,7 +294,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             currj = [pyb.getJointState(self.robot, i)[0] for i in self.joints]
             currj = np.array(currj)
 
-            base_pos = self._get_obs()[:2]
+            base_pos = self._get_obs(False)[:2]
 
             self.movej(self.resting_pose_angles[self.robot_name])
             
@@ -297,7 +345,7 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
     def _perform_action(self, action):
 
         if action is not None:
-            state = self._get_obs()
+            state = self._get_obs(False)
             # unfortunately, the order of dict entries matters to the gym contains() method here
             # if somehow the order of dict entries in the observation space OrderedDict changes, then the order of the next lines defining the entries of the new state needs to be switched as well
             new_ee_position = state[2:5] + action[:3]
@@ -315,12 +363,12 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
         while not self.is_static:
             pyb.stepSimulation()
     
-    def move_base(self, new_base_pos, dynamic=True, delay = 0):
+    def _move_base(self, new_base_pos, dynamic=True, delay = 0):
         """
         Method for moving the robot base to different coordinates.
         Will return True if movement happened, False if not.
         """
-        state = self._get_obs()
+        state = self._get_obs(False)
         pos_diff = new_base_pos - state[:2]
         pos_dist = np.linalg.norm(pos_diff)
         if pos_dist > 1e-4:
@@ -496,6 +544,97 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
     # utility methods #
     ###################
 
+    def _register_data(self):
+        """
+        Scans URDF(obj) files in asset path and creates a list, associating file name with weld seams and ground truths.
+        This can can later be used to load these objects into the simulation, see load_object_into_env method.
+        """
+        data_path = self.asset_files_path+"objects/"
+        filenames = []
+        frames = []
+        for file in [file_candidate for file_candidate in os.listdir(data_path) if os.path.isfile(os.path.join(data_path, file_candidate))]:
+            if ".urdf" in file:
+                if (os.path.isfile(os.path.join(data_path, file.replace(".urdf",".xml"))) and 
+                os.path.isfile(os.path.join(data_path, file.replace(".urdf",".obj"))) ):
+                    
+                    frames.append(xml_parser.parse_frame_dump(os.path.join(data_path, file.replace(".urdf",".xml"))))
+                    filenames.append(file)
+                else:
+                    raise FileNotFoundError("URDF file "+file+" is missing its associated xml or obj!")
+
+        return { "filenames": filenames, "frames": frames }
+
+    def load_object_into_env(self, index):
+        """
+        Method for loading an object into the simulation.
+        Args:
+            - index: index of the desired file in the dataset list
+        """
+
+        self.current_part_id = self.add_object(os.path.join(self.asset_files_path+"objects/", self.dataset["filenames"][index]), 
+                                                    pose = (self.xyz_offset, [0, 0, 0, 1]))
+        self._set_goals(index)
+
+
+    def _set_goals(self, index):
+        """
+        Uses the dataset to load in the weldseams of the file indicated by index into the goals list.
+        One element in goal array <=> one weldseam in the original xml
+
+        Args:
+            index: int, signifies index in the dataset array
+        """
+
+        self.goals = []
+        frames = self.dataset["frames"][index]
+        for frame in frames:
+            tmp = {}
+            tmp["weldseams"] = [ele["position"] * self.pybullet_scale_factor + self.xyz_offset for ele in frame["weld_frames"]]
+            tmp["norm"] = [ele["norm"] for ele in frame["weld_frames"]]
+            tmp["target_pos"] = [ele[:3,3] * self.pybullet_scale_factor + self.xyz_offset for ele in frame["pose_frames"]]
+            tmp["target_rot"] = [matrix_to_quaternion(ele[:3,:3]) for ele in frame["pose_frames"]]
+            tmp["tool"] = 1 if frame["torch"][3] == "TAND_GERAD_DD" else 0           
+            self.goals.append(tmp)
+
+    def _set_plan(self):
+        """
+        Sets the plan by extracting all intermediate steps from the foremost element in the goals list.
+        Also moves the base such that the robot arm can fullfill the plan.
+        """
+        if self.goals:
+            self.plan = []
+            goal = self.goals.pop(0)
+            target_pos_bas = np.average(goal["weldseams"], axis=0)[:2]
+            for idx in range(len(goal["weldseams"])):
+                tpl = (goal["weldseams"][idx], goal["norm"][idx], goal["target_rot"][idx], goal["tool"], target_pos_bas)
+                self.plan.append(tpl)
+            self._move_base(target_pos_bas)
+            return True
+        else:
+            return False
+
+    def _set_objective(self):
+        """
+        Gets the foremost step of the plan.
+        """
+        if self.plan:
+            self.objective = self.plan.pop(0)
+            return True
+        else:
+            return False
+
+    def update_objectives(self):
+        """
+        Just a wrapper method for convenience
+        """
+
+        if not self.plan and not self.objective and self.path_state != 2:  # only create new plan if there's also no current objective
+            self._set_plan()
+        if not self.objective and self.path_state != 2:
+            self._set_objective()
+            tool = self.objective[3]
+            self.switch_tool(tool)
+
     def _init_settings(self):
         """
         Sets a number of class variables containing constants for various calculations.
@@ -558,8 +697,27 @@ class WeldingEnvironmentPybullet(WeldingEnvironment):
             "kr6": [[0, 0, 0, 1], [0, 0, 0, 1]]  # tbd
         }
 
+        # movement speed of the robot arm and base
         self.pos_speed = 0.01  # provisional
         self.base_speed = 10 * self.pos_speed
+
+        # offset at which the welding assets will be placed into the world
+        self.xyz_offset = np.array((0, 0, 0.01)) 
+
+        # reward variables
+        # radius of the sphere around the goal position for the robot end effector in which a full reward will be given
+        self.ee_pos_reward_thresh = 5e-2  # might need adjustment
+        # threshold for quaternion similarity in reward function (see util/util.py method)
+        self.quat_sim_thresh = 4e-2  # this probably too
+
+        # pybullet id of the part the agent is currently dealing with
+        self.current_part_id = None
+
+        # height at which the ee is transported when not welding
+        self.safe_height = 0.5
+
+        # scale factor for the meshes
+        self.pybullet_scale_factor = 0.0005
 
     def _init_gym_vars(self):
 
@@ -641,20 +799,58 @@ class WeldingEnvironmentPybulletConfigSpace(WeldingEnvironmentPybullet):
                 asset_files_path,
                 display=False,
                 hz=240,
-                robot="ur5"):
+                robot="ur5",
+                additive=False):
 
         super().__init__(agent, asset_files_path, display, hz, robot)
+        self.additive = additive
 
     def _perform_action(self, action):
         if action is not None:
             new_joints = action       
 
             # move the joints
-            timeout = self.movej(new_joints)
+            if self.additive:
+                timeout = self.movej(self.get_joint_state() + new_joints)
+            else:
+                timeout = self.movej(new_joints)
             if timeout:
                 return timeout
         
         while not self.is_static:
             pyb.stepSimulation()
+    
+    def step(self, action=None):
+
+        self._perform_action(action)
+        
+        obs = self._get_obs(False)
+
+        reward, success, done = self.reward(obs) if action is not None else (0, False, False)
+        if success:
+            self.next_state()
+        self.update_objectives()
+
+        return obs, reward, done, success
+
+    def solve_ik(self, pose):
+        """
+        Calculate joint configuration with inverse kinematics.
+        """
+
+        joints = pyb.calculateInverseKinematics(
+            bodyUniqueId=self.robot,
+            endEffectorLinkIndex=self.end_effector_link_id[self.robot_name],
+            targetPosition=pose[0],
+            targetOrientation=pose[1],
+            #lowerLimits=self.joints_lower[self.robot_name],
+            #upperLimits=self.joints_upper[self.robot_name],
+            #jointRanges=self.joints_range[self.robot_name],
+            #restPoses=np.float32(self.resting_pose_angles[self.robot_name]).tolist(),
+            maxNumIterations=1000000,
+            residualThreshold=1e-4)
+        joints = np.float32(joints)
+        joints[2:] = (joints[2:] + np.pi) % (2 * np.pi) - np.pi
+        return joints
 
         
