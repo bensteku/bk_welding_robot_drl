@@ -15,8 +15,8 @@ done = False
 
 while not False:
     act = a.act(obs)
-    obs, reward, done, success = e.step(act)
-    if success:
+    obs, reward, done, info = e.step(act)
+    if info["is_success"]:
         a.trajectory = []
     sleep(0.05)
 

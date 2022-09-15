@@ -1,13 +1,13 @@
 from itertools import count
 import torch
-from environment.environment import WeldingEnvironmentPybullet, WeldingEnvironmentPybulletConfigSpace
+from environment.environment import WeldingEnvironmentPybullet, WeldingEnvironmentPybulletConfigSpace, WeldingEnvironmentPybulletLidar
 from agent.agent import AgentPybulletNN
 from model.model import AgentModelSimple, ReplayMemory
 import numpy as np
 from collections import deque
 
 agent = AgentPybulletNN()
-env = WeldingEnvironmentPybulletConfigSpace(agent, "./assets/", True, robot="kr16", additive=True)
+env = WeldingEnvironmentPybulletLidar(agent, "./assets/", True, robot="kr16")
 
 memory = ReplayMemory(100000)
 
@@ -46,8 +46,9 @@ for i_episode in range(num_episodes):
         print("action")
         print(action)
         print("reward")
-        print(reward)
         """
+        print(reward)
+        
         memory.push(state_old, action, state_new, reward)
         state_old = state_new
 

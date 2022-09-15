@@ -36,6 +36,27 @@ def matrix_to_quaternion(matrix):
     q = np.array([ele * 0.5 / np.sqrt(t) for ele in q])
     return q
 
+def quaternion_to_matrix(quaternion):
+    """Return homogeneous rotation matrix from quaternion.
+
+    >>> R = quaternion_matrix([0.06146124, 0, 0, 0.99810947])
+    >>> numpy.allclose(R, rotation_matrix(0.123, (1, 0, 0)))
+    True
+
+    """
+    q = np.array(quaternion[:4], dtype=np.float64, copy=True)
+    nq = np.dot(q, q)
+    if nq < np.finfo(float).eps * 4.0:
+        return np.identity(4)
+    q *= np.sqrt(2.0 / nq)
+    q = np.outer(q, q)
+    return np.array((
+        (1.0-q[1, 1]-q[2, 2],     q[0, 1]-q[2, 3],     q[0, 2]+q[1, 3], 0.0),
+        (    q[0, 1]+q[2, 3], 1.0-q[0, 0]-q[2, 2],     q[1, 2]-q[0, 3], 0.0),
+        (    q[0, 2]-q[1, 3],     q[1, 2]+q[0, 3], 1.0-q[0, 0]-q[1, 1], 0.0),
+        (                0.0,                 0.0,                 0.0, 1.0)
+        ), dtype=np.float64)
+
 def rpy_to_quaternion(rpy):
     """
     Utility method to get quaternion from roll-pitch-yaw angles.

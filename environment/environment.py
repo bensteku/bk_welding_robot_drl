@@ -2,7 +2,7 @@ import gym
 import pybullet as pyb
 import time
 import numpy as np
-from util.util import quaternion_multiply, quaternion_invert, suppress_stdout, matrix_to_quaternion, exp_decay_alt, quaternion_similarity
+from util.util import quaternion_multiply, quaternion_invert, suppress_stdout, matrix_to_quaternion, exp_decay_alt, quaternion_similarity, quaternion_to_matrix
 from util import xml_parser
 import os
 from collections import OrderedDict
@@ -76,8 +76,13 @@ class WeldingEnvironmentPybullet(gym.Env):
         if success:
             self.next_state()
         self.update_objectives()
+        info = {
+            "episode_counter": 0,  # TODO
+            "is_success": success
+        }
 
-        return self._normalize_obs(obs), reward, done, success
+        #return self._normalize_obs(obs), reward, done, info
+        return obs, reward, done, info
 
     def reset(self):
 
@@ -139,9 +144,9 @@ class WeldingEnvironmentPybullet(gym.Env):
                             computeForwardKinematics=True  # need to check if this is necessary, if not can be turned off for performance gain
             )
         if self.objective:
-            state = np.hstack((np.array(tmp2[4][:2]), np.array(tmp[0]), pyb.getEulerFromQuaternion(self._quat_ee_to_w(np.array(tmp[1]))), self.get_joint_state(), self.objective[0], self.objective[1][0], self.objective[1][1], [self.path_state])).astype(np.float32)
+            state = np.hstack((np.array(tmp2[4][:2]), np.array(tmp[0]), pyb.getEulerFromQuaternion(self._quat_ee_to_w(np.array(tmp[1]))), self.get_joint_state(), self.objective[0], self.objective[1][0], self.objective[1][1], [self.path_state])).astype(np.float64)
         else:
-            state = np.hstack((np.array(tmp2[4][:2]), np.array(tmp[0]), pyb.getEulerFromQuaternion(self._quat_ee_to_w(np.array(tmp[1]))), self.get_joint_state(), [0, 0, 0], [1, 0, 0], [1, 0, 0], [self.path_state])).astype(np.float32)
+            state = np.hstack((np.array(tmp2[4][:2]), np.array(tmp[0]), pyb.getEulerFromQuaternion(self._quat_ee_to_w(np.array(tmp[1]))), self.get_joint_state(), [0, 0, 0], [1, 0, 0], [1, 0, 0], [self.path_state])).astype(np.float64)
         if normalize:
             state = self._normalize_obs(state)
         return state
@@ -176,7 +181,7 @@ class WeldingEnvironmentPybullet(gym.Env):
     # methods for dealing with pybullet environment and the simulation #
     ####################################################################
 
-    def reward(self, obs=None):
+    def _reward(self, obs=None):
         """
         Method for calculating the rewards.
         Args:
@@ -238,6 +243,32 @@ class WeldingEnvironmentPybullet(gym.Env):
         
 
         success = (pos_done and rot_done) and not col
+        done = (self.objective is None and len(self.plan)==0 and len(self.goals)==0) or col
+
+        return reward, success, done
+
+    def reward(self, obs):
+        pos_done=False
+        if self.path_state == 2:
+            distance = np.linalg.norm(np.array([obs[2], obs[3], self.safe_height]) - obs[2:5]) 
+        else:
+            objective_with_slight_offset = self.objective[0] + self.objective[1][0] * 0.01 + self.objective[1][1] * 0.01
+            objective_with_slight_offset = np.array([1.96945097e+00,  1.87400000e+00,  8.26572114e-01])
+            distance = np.linalg.norm(objective_with_slight_offset - obs[2:5]) 
+        if distance < self.ee_pos_reward_thresh:
+            reward = 1
+            pos_done = True  # objective achieved
+        else:
+            reward = -0.1 * distance
+        col = self.is_in_collision()
+        if col and not (pos_done):
+            reward = -5
+            pos_done = False
+
+        if pos_done:
+            self.objective = None
+
+        success = pos_done and not col
         done = (self.objective is None and len(self.plan)==0 and len(self.goals)==0) or col
 
         return reward, success, done
@@ -738,17 +769,17 @@ class WeldingEnvironmentPybullet(gym.Env):
         min_agent_path_state = 0
         max_agent_path_state = 2
 
-        low = np.hstack([min_position_base, min_position, min_rotation, min_joints, min_objective_position, min_norms, min_agent_path_state]).astype(np.float32)
-        high = np.hstack([max_position_base, max_position, max_rotation, max_joints, max_objective_position, max_norms, max_agent_path_state]).astype(np.float32)
+        low = np.hstack([min_position_base, min_position, min_rotation, min_joints, min_objective_position, min_norms, min_agent_path_state]).astype(np.float64)
+        high = np.hstack([max_position_base, max_position, max_rotation, max_joints, max_objective_position, max_norms, max_agent_path_state]).astype(np.float64)
 
         self.observation_space = gym.spaces.Box(low=low, high=high, shape=(24,), dtype=np.float32)
         
         # actions consist of marginal (base-)translations and rotations
         # indices 0-1:base, 2-4: ee, 5-7: ee rotation in rpy
-        min_action = np.array([-1, -1, -1, -1, -1, -1 ]) #tbd
+        min_action = np.array([-1, -1, -1, -1, -1, -1 ]).astype(np.float64) / 20 #tbd
         max_action = min_action * -1
 
-        self.action_space = gym.spaces.Box(low=min_action, high=max_action, shape=(6,), dtype=np.float32)
+        self.action_space = gym.spaces.Box(low=min_action, high=max_action, shape=(6,), dtype=np.float64)
 
     def manual_control(self):
         # code to manually control the robot in real time
@@ -830,8 +861,12 @@ class WeldingEnvironmentPybulletConfigSpace(WeldingEnvironmentPybullet):
         if success:
             self.next_state()
         self.update_objectives()
+        info = {
+            "episode_counter": 0,  # TODO
+            "is_success": success
+        }
 
-        return obs, reward, done, success
+        return obs, reward, done, info
 
     def solve_ik(self, pose):
         """
@@ -854,3 +889,304 @@ class WeldingEnvironmentPybulletConfigSpace(WeldingEnvironmentPybullet):
         return joints
 
         
+class WeldingEnvironmentPybulletLidar(WeldingEnvironmentPybullet):
+
+    def __init__(self,
+                agent,
+                asset_files_path,
+                display=False,
+                hz=240,
+                robot="ur5"):
+        super().__init__(agent, asset_files_path, display, hz, robot)
+        
+        # overwrite the observation space to extend it with lidar data
+        min_position_base = np.array([0, 0]) 
+        max_position_base = np.array([5., 5.])
+        min_position = np.array([0, 0, 0])  
+        max_position = np.array([5., 5., 2])
+        min_rotation = np.array([-1, -1, -1]) * np.pi
+        max_rotation = min_rotation * (-1)
+        min_joints = self.joints_lower[self.robot_name]
+        max_joints = self.joints_upper[self.robot_name]
+        min_objective_position = min_position
+        max_objective_position = max_position
+        min_norms = np.zeros(6)
+        max_norms = np.ones(6)
+        min_agent_path_state = 0
+        max_agent_path_state = 2
+        min_lidar = np.zeros(10)
+        max_lidar = np.ones(10)
+
+        low = np.hstack([min_position_base, min_position, min_rotation, min_joints, min_objective_position, min_norms, min_agent_path_state, min_lidar]).astype(np.float64)
+        high = np.hstack([max_position_base, max_position, max_rotation, max_joints, max_objective_position, max_norms, max_agent_path_state, max_lidar]).astype(np.float64)
+
+        self.observation_space = gym.spaces.Box(low=low, high=high, shape=(34,), dtype=np.float32)
+
+    def _set_lidar_cylinder(self, ray_min=0.02, ray_max=0.4, ray_num_ver=6, ray_num_hor=12, render=False):
+        ray_froms = []
+        ray_tops = []
+        inf = pyb.getLinkState(self.robot, self.end_effector_link_id[self.robot_name])
+        frame = quaternion_to_matrix(inf[5])
+        frame[0:3,3] = inf[4]
+        ray_froms.append(np.matmul(np.asarray(frame),np.array([0.0,0.0,0.01,1]).T)[0:3].tolist())
+        ray_tops.append(np.matmul(np.asarray(frame),np.array([0.0,0.0,ray_max,1]).T)[0:3].tolist())
+
+
+        for angle in range(230, 270, 20):
+            for i in range(ray_num_hor):
+                z = -ray_max * np.sin(angle*np.pi/180)
+                l = ray_max * np.cos(angle*np.pi/180)
+                x_end = l*np.cos(2*np.pi*float(i)/ray_num_hor)
+                y_end = l*np.sin(2*np.pi*float(i)/ray_num_hor)
+                start = np.matmul(np.asarray(frame),np.array([0.0,0.0,0.01,1]).T)[0:3].tolist()
+                end = np.matmul(np.asarray(frame),np.array([x_end,y_end,z,1]).T)[0:3].tolist()
+                ray_froms.append(start)
+                ray_tops.append(end)
+        
+        # set the angle of rays
+        interval = -0.005
+        
+        for i in range(8):
+            ai = i*np.pi/4
+            for angle in range(ray_num_ver):    
+                z_start = (angle)*interval-0.1
+                x_start = ray_min*np.cos(ai)
+                y_start = ray_min*np.sin(ai)
+                start = np.matmul(np.asarray(frame),np.array([x_start,y_start,z_start,1]).T)[0:3].tolist()
+                z_end = (angle)*interval-0.1
+                x_end = ray_max*np.cos(ai)
+                y_end = ray_max*np.sin(ai)
+                end = np.matmul(np.asarray(frame),np.array([x_end,y_end,z_end,1]).T)[0:3].tolist()
+                ray_froms.append(start)
+                ray_tops.append(end)
+        
+        for angle in range(250, 270, 20):
+            for i in range(ray_num_hor):
+                z = -0.2+ray_max * np.sin(angle*np.pi/180)
+                l = ray_max * np.cos(angle*np.pi/180)
+                x_end = l*np.cos(np.pi*float(i)/ray_num_hor-np.pi/2)
+                y_end = l*np.sin(np.pi*float(i)/ray_num_hor-np.pi/2)
+                
+                start = np.matmul(np.asarray(frame),np.array([x_start,y_start,z_start-0.1,1]).T)[0:3].tolist()
+                end = np.matmul(np.asarray(frame),np.array([x_end,y_end,z,1]).T)[0:3].tolist()
+                ray_froms.append(start)
+                ray_tops.append(end)
+        results = pyb.rayTestBatch(ray_froms, ray_tops)
+       
+        if render:
+            hitRayColor = [0, 1, 0]
+            missRayColor = [1, 0, 0]
+
+            pyb.removeAllUserDebugItems()
+
+            for index, result in enumerate(results):
+                if result[0] == -1:
+                    pyb.addUserDebugLine(ray_froms[index], ray_tops[index], missRayColor)
+                else:
+                    pyb.addUserDebugLine(ray_froms[index], ray_tops[index], hitRayColor)
+        return results
+
+    def _get_lidar_probe(self):
+        lidar_results = self._set_lidar_cylinder()
+        obs_rays = np.zeros(shape=(85,),dtype=np.float32)
+        indicator = np.zeros((10,), dtype=np.float32)
+        for i, ray in enumerate(lidar_results):
+            obs_rays[i] = ray[2]
+        rays_sum = []
+        rays_sum.append(obs_rays[0:25])
+        rays_sum.append(obs_rays[25:31])
+        rays_sum.append(obs_rays[31:37])
+        rays_sum.append(obs_rays[37:43])
+        rays_sum.append(obs_rays[43:49])
+        rays_sum.append(obs_rays[49:55])
+        rays_sum.append(obs_rays[55:61])
+        rays_sum.append(obs_rays[61:67])
+        rays_sum.append(obs_rays[67:73])
+        rays_sum.append(obs_rays[73:])
+        for i in range(10):
+            if rays_sum[i].min()>=0.99:
+                indicator[i] = 0
+            if 0.5<rays_sum[i].min()<0.99:
+                indicator[i] = 1
+            if rays_sum[i].min()<=0.5:
+                indicator[i] = 2
+        return indicator
+
+    def _get_obs(self, normalize=False):
+
+        tmp = pyb.getLinkState(
+                            bodyUniqueId=self.robot,
+                            linkIndex=self.end_effector_link_id[self.robot_name],
+                            computeForwardKinematics=True  # need to check if this is necessary, if not can be turned off for performance gain
+            )
+        tmp2 = pyb.getLinkState(
+                            bodyUniqueId=self.robot,
+                            linkIndex=self.base_link_id[self.robot_name],
+                            computeForwardKinematics=True  # need to check if this is necessary, if not can be turned off for performance gain
+            )
+        lidar_results = self._get_lidar_probe()
+        if self.objective:
+            state = np.hstack((np.array(tmp2[4][:2]), np.array(tmp[0]), pyb.getEulerFromQuaternion(self._quat_ee_to_w(np.array(tmp[1]))), self.get_joint_state(), self.objective[0], self.objective[1][0], self.objective[1][1], [self.path_state], lidar_results)).astype(np.float64)
+        else:
+            state = np.hstack((np.array(tmp2[4][:2]), np.array(tmp[0]), pyb.getEulerFromQuaternion(self._quat_ee_to_w(np.array(tmp[1]))), self.get_joint_state(), [0, 0, 0], [1, 0, 0], [1, 0, 0], [self.path_state], lidar_results)).astype(np.float64)
+        if normalize:
+            state = self._normalize_obs(state)
+        return state
+
+    def _normalize_obs(self, obs):
+        """
+        Method to normalize the state such that the inputs for the NN are between -1 and 1
+        Expects a numpy array, not a pytorch tensor
+        """
+        low = self.observation_space.low
+        high = self.observation_space.high
+        # both base position and ee position can be expressed as a percentage of their upper bound by simple division with it
+        # this works as long as the lower bound stays at 0
+        normalized_base_position = obs[:2] / high[:2]  # element-wise division
+        normalized_ee_position = obs[2:5] / high[2:5]
+        # the rpy values are projected to between -1 and 1 with max and min values being pi and -pi
+        normalized_rpy = 2 * ((obs[5:8] + np.ones(3) * np.pi) / (np.ones(3) * 2 * np.pi)) - np.ones(3) # -(-)pi/(pi-(-)pi), standard lower-upper-bound formula
+        # the joint values are normalized via the saved joint limits
+        normalized_joints = 2 * ((obs[8:14] - self.joints_lower[self.robot_name]) / (self.joints_range[self.robot_name])) - np.ones(6)
+        # the objective position needs to be normalized via the upper bound as above with the ee, the norms are already normalized
+        normalized_objective_position = obs[14:17] / high[2:5]
+        # finally, the agent path state can be normalized by dividing by 2, as there are only 3 states
+        normalized_agent_path_state = obs[23] / 2
+        # same goes for the lidar results
+        normalized_lidar_results = obs[24:] / 2
+
+        return np.hstack([normalized_base_position, normalized_ee_position, normalized_rpy, normalized_joints, normalized_objective_position, obs[17:23], normalized_agent_path_state, normalized_lidar_results])
+
+class WeldingEnvironmentPybulletLidar2(WeldingEnvironmentPybulletLidar):
+
+    def __init__(self,
+                agent,
+                asset_files_path,
+                display=False,
+                hz=240,
+                robot="ur5"):
+        super().__init__(agent, asset_files_path, display, hz, robot)
+        
+        # overwrite the observation space to extend it with lidar data
+        min_position_base = np.array([0, 0]) 
+        max_position_base = np.array([5., 5.])
+        min_position = np.array([0, 0, 0])  
+        max_position = np.array([5., 5., 2])
+        min_rotation = np.array([-1, -1, -1]) * np.pi
+        max_rotation = min_rotation * (-1)
+        min_joints = self.joints_lower[self.robot_name]
+        max_joints = self.joints_upper[self.robot_name]
+        min_objective_position = min_position
+        max_objective_position = max_position
+        min_norms = np.zeros(6)
+        max_norms = np.ones(6)
+        min_agent_path_state = 0
+        max_agent_path_state = 2
+        min_lidar = np.zeros(10)
+        max_lidar = np.ones(10)
+
+        low = np.hstack([min_position_base, min_position, min_rotation, min_joints, min_objective_position]).astype(np.float64)
+        high = np.hstack([max_position_base, max_position, max_rotation, max_joints, max_objective_position]).astype(np.float64)
+
+        #self.observation_space = gym.spaces.Box(low=low, high=high, shape=(34,), dtype=np.float32)
+
+        obs_spaces = {
+            'position': gym.spaces.Box(low=low, high=high, shape=(17,), dtype=np.float32),
+            'indicator': gym.spaces.Box(low=0, high=2, shape=(10,), dtype=np.int8),
+            'path_state': gym.spaces.Box(low=0, high=2, shape=(1,), dtype=np.int8)
+        } 
+        self.observation_space=gym.spaces.Dict(obs_spaces)
+
+    def _get_obs(self, normalize=False):
+
+        tmp = pyb.getLinkState(
+                            bodyUniqueId=self.robot,
+                            linkIndex=self.end_effector_link_id[self.robot_name],
+                            computeForwardKinematics=True  # need to check if this is necessary, if not can be turned off for performance gain
+            )
+        tmp2 = pyb.getLinkState(
+                            bodyUniqueId=self.robot,
+                            linkIndex=self.base_link_id[self.robot_name],
+                            computeForwardKinematics=True  # need to check if this is necessary, if not can be turned off for performance gain
+            )
+        lidar_results = self._get_lidar_probe()
+        if self.objective:
+            state = np.hstack((np.array(tmp2[4][:2]), np.array(tmp[0]), pyb.getEulerFromQuaternion(self._quat_ee_to_w(np.array(tmp[1]))), self.get_joint_state(), self.objective[0])).astype(np.float64)
+        else:
+            state = np.hstack((np.array(tmp2[4][:2]), np.array(tmp[0]), pyb.getEulerFromQuaternion(self._quat_ee_to_w(np.array(tmp[1]))), self.get_joint_state(), [0, 0, 0])).astype(np.float64)
+    
+        return {
+            'position': state,
+            'indicator': lidar_results,
+            'path_state': self.path_state
+        }
+
+    def _move_base(self, new_base_pos, dynamic=True, delay = 0):
+        """
+        Method for moving the robot base to different coordinates.
+        Will return True if movement happened, False if not.
+        """
+        state = self._get_obs(False)
+        pos_diff = new_base_pos - state["position"][:2]
+        pos_dist = np.linalg.norm(pos_diff)
+        if pos_dist > 1e-4:
+            if not dynamic:
+                pyb.resetBasePositionAndOrientation(self.robot, np.append(new_base_pos, self.fixed_height[self.robot_name]), pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
+                return True
+            else:
+                steps = int(pos_dist / self.base_speed)
+                step = pos_diff * (self.base_speed / pos_dist)
+                for i in range(steps):
+                    pyb.resetBasePositionAndOrientation(self.robot, np.append(state["position"][:2] + (i+1)*step, self.fixed_height[self.robot_name]), pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
+                    if delay:
+                        time.sleep(delay)
+                pyb.resetBasePositionAndOrientation(self.robot, np.append(new_base_pos, self.fixed_height[self.robot_name]), pyb.getQuaternionFromEuler([np.pi, 0., 0.]))
+                return True
+        return False
+
+    def _perform_action(self, action):
+
+        if action is not None:
+            state = self._get_obs(False)
+            # unfortunately, the order of dict entries matters to the gym contains() method here
+            # if somehow the order of dict entries in the observation space OrderedDict changes, then the order of the next lines defining the entries of the new state needs to be switched as well
+            new_ee_position = state["position"][2:5] + action[:3]
+            current_rotation_as_rpy = pyb.getEulerFromQuaternion(state["position"][5:9])
+            new_rotation_as_rpy = np.array([entry + action[3:][idx] for idx, entry in enumerate(current_rotation_as_rpy)])
+            new_rotation_as_quaternion = pyb.getQuaternionFromEuler(new_rotation_as_rpy)
+            new_rotation_as_quaternion_in_correct_frame = self._quat_w_to_ee(new_rotation_as_quaternion)         
+            # TODO: reimplement the valid bounds check once the bounds have actually been settled on sometime in the future
+
+            # based on the information above, move the joints
+            timeout = self.movep((new_ee_position, new_rotation_as_quaternion_in_correct_frame))
+            if timeout:
+                return timeout
+        
+        while not self.is_static:
+            pyb.stepSimulation()
+
+    def reward(self, obs):
+        pos_done=False
+        if self.path_state == 2:
+            distance = np.linalg.norm(np.array([obs[2], obs[3], self.safe_height]) - obs["position"][2:5]) 
+        else:
+            objective_with_slight_offset = self.objective[0] + self.objective[1][0] * 0.01 + self.objective[1][1] * 0.01
+            objective_with_slight_offset = np.array([1.96945097e+00,  1.87400000e+00,  8.26572114e-01])
+            distance = np.linalg.norm(objective_with_slight_offset - obs["position"][2:5]) 
+        if distance < self.ee_pos_reward_thresh:
+            reward = 10
+            pos_done = True  # objective achieved
+        else:
+            reward = -0.01 * distance
+        col = self.is_in_collision()
+        if col and not (pos_done):
+            reward = -10
+            pos_done = False
+
+        if pos_done:
+            self.objective = None
+
+        success = pos_done and not col
+        done = (self.objective is None and len(self.plan)==0 and len(self.goals)==0) or col
+
+        return reward, success, done
