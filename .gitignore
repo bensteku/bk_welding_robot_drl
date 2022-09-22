@@ -10,3 +10,4 @@ todo.md
 *.dat
 scripts/saved_trees
 model/weights
+*.zip
