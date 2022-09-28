@@ -59,8 +59,16 @@ class PathingEnvironmentPybullet(gym.Env):
 
         # threshold for the end effector position for maximum reward
         # == a sphere around the target where maximum reward is applied
-        # might be modified in the course of training
-        self.ee_pos_reward_thresh = 2e-2
+        # is modified in the course of training
+        if self.train:
+            self.ee_pos_reward_thresh = 3.1e-1
+            self.ee_pos_reward_thresh_min = 4e-3
+            self.ee_pos_reward_thresh_max = 6e-1
+            self.ee_pos_reward_thresh_increments = 2e-2
+            self.ee_pos_reward_threshold_change_after_episodes = 50
+            self.success_buffer = []
+        else:
+            self.ee_pos_reward_thresh = 5e-3
 
         # variables storing information about the current state, saves performance from having to 
         # access the pybullet interface all the time
@@ -78,9 +86,14 @@ class PathingEnvironmentPybullet(gym.Env):
         self.steps_current_episode = 0
         self.steps_total = 0
         # maximum steps per episode
-        self.maximum_steps_per_episode = 1024
+        if self.train:
+            self.maximum_steps_per_episode = 1024
+        else:
+            self.maximum_steps_per_episode = 512  # reduce the overhead for model evaluation
         # episode counter
         self.episodes = 0
+        self.episode_reward = 0
+        self.episode_distance = 0
         # success counter, to calculate success rate
         self.successes = 0
 
@@ -114,6 +127,8 @@ class PathingEnvironmentPybullet(gym.Env):
         # set the step and episode counters correctly
         self.steps_current_episode = 0
         self.episodes += 1
+        self.episode_reward = 0
+        self.episode_distance = 0
 
         # clear out stored objects and reset the simulation
         self.obj_ids = []
@@ -154,6 +169,18 @@ class PathingEnvironmentPybullet(gym.Env):
         self.rot = np.array(ee_link_state[5])
         self.joints = self.resting_pose_angles
         self.lidar_probe = self._get_lidar_probe()
+
+        if self.train and self.episodes % self.ee_pos_reward_threshold_change_after_episodes == 0:
+            success_rate = np.average(self.success_buffer)
+            if success_rate < 0.8 and self.ee_pos_reward_thresh < self.ee_pos_reward_thresh_max:
+                self.ee_pos_reward_thresh += self.ee_pos_reward_thresh_increments/4
+            elif success_rate > 0.8 and self.ee_pos_reward_thresh > self.ee_pos_reward_thresh_min:
+                self.ee_pos_reward_thresh -= self.ee_pos_reward_thresh_increments
+            if self.ee_pos_reward_thresh < self.ee_pos_reward_thresh_min:
+                self.ee_pos_reward_thresh = self.ee_pos_reward_thresh_min
+            if self.ee_pos_reward_thresh > self.ee_pos_reward_thresh_max:
+                self.ee_pos_reward_thresh = self.ee_pos_reward_thresh_max
+            print("Current threshold for maximum reward: " + str(self.ee_pos_reward_thresh))
 
         # turn on rendering again
         pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
@@ -236,7 +263,16 @@ class PathingEnvironmentPybullet(gym.Env):
 
         if self.steps_current_episode > self.maximum_steps_per_episode:
             done = True
+
+        if self.train:
+            if done:
+                self.success_buffer.append(is_success)
+                if len(self.success_buffer) > self.ee_pos_reward_threshold_change_after_episodes:
+                    self.success_buffer.pop(0)
         
+        self.episode_reward += reward
+        self.episode_distance += distance_cur
+
         info = {
             'step': self.steps_current_episode,
             'steps_total': self.steps_total,
@@ -246,7 +282,9 @@ class PathingEnvironmentPybullet(gym.Env):
             'success_rate': self.successes/self.episodes,
             'collided': collided,
             'reward': reward,
-            'distance': distance_cur
+            'episode_reward': self.episode_reward,
+            'distance': distance_cur,
+            'episode_distance': self.episode_distance
         }
 
         if done:
