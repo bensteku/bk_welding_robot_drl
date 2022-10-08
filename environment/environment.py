@@ -8,7 +8,8 @@ class PathingEnvironmentPybullet(gym.Env):
 
     def __init__(self,
                 asset_files_path,
-                train,
+                train=False,
+                use_joints=False,
                 display=False,
                 show_target=False):
 
@@ -20,6 +21,9 @@ class PathingEnvironmentPybullet(gym.Env):
 
         # bool flag for showing the target in the pybullet simulation
         self.show_target = show_target
+
+        # bool falg for whether actions are xyz and rpy movements or joint movements
+        self.use_joints = use_joints
         
         # list of pybullet object ids currently in the env
         self.obj_ids = []
@@ -44,10 +48,14 @@ class PathingEnvironmentPybullet(gym.Env):
         self.ground_truth_conversion_angles = [np.array([-0.2726201, 0.2726201, -0.6524402, -0.6524402]), 
                                                np.array([-0.0676347, 0.0676347, -0.7038647, -0.7038647])]
 
-        # maximum translational movement
-        self.pos_speed = 0.02
-        # maximum rotational movement
-        self.rot_speed = 0.01 
+        # if use_joints is set to false:
+        # maximum translational movement per step
+        self.pos_speed = 0.00001
+        # maximum rotational movement per step
+        self.rot_speed = 0.00001 
+        # if use_joints is set to true:
+        # maximum joint movement per step
+        self.joint_speed = 0.001
 
         # offset at wich welding meshes will be placed into the world
         self.xyz_offset = np.array([0, 0, 0])  # all zero for now, might change later on
@@ -61,10 +69,10 @@ class PathingEnvironmentPybullet(gym.Env):
         # == a sphere around the target where maximum reward is applied
         # is modified in the course of training
         if self.train:
-            self.ee_pos_reward_thresh = 3.1e-1
+            self.ee_pos_reward_thresh = 3e-1
             self.ee_pos_reward_thresh_min = 4e-3
             self.ee_pos_reward_thresh_max = 6e-1
-            self.ee_pos_reward_thresh_increments = 2e-2
+            self.ee_pos_reward_thresh_increments = 1e-2
             self.ee_pos_reward_threshold_change_after_episodes = 50
             self.success_buffer = []
         else:
@@ -74,8 +82,10 @@ class PathingEnvironmentPybullet(gym.Env):
         # access the pybullet interface all the time
         self.pos = None
         self.rot = None
+        self.rot_internal = None
         self.pos_last = None
         self.target = None
+        self.target_norms = None
         self.lidar_probe = None
         self.joints = None
 
@@ -107,7 +117,7 @@ class PathingEnvironmentPybullet(gym.Env):
         self.observation_space = gym.spaces.Dict(
             {
               'spatial': gym.spaces.Box(low=-2, high=2, shape=(14,), dtype=np.float32),
-              'lidar': gym.spaces.Box(low=0, high=2, shape=(10,), dtype=np.int8)  
+              'lidar': gym.spaces.Box(low=0, high=2, shape=(17,), dtype=np.int8)  
             }
         )
 
@@ -144,12 +154,18 @@ class PathingEnvironmentPybullet(gym.Env):
         # load in the mesh of the welding part
         # info: the method will load the mesh at given index within the self.dataset variable
         file_index = np.random.choice(range(len(self.dataset["filenames"]))) 
-        file_index = self.dataset["filenames"].index("201910204483_R1.urdf")
+        #file_index = self.dataset["filenames"].index("201910204483_R1.urdf")
+        #file_index = 314
         self._add_object("objects/"+self.dataset["filenames"][file_index], self.xyz_offset)
         # set the target and base target
         target_index = np.random.choice(range(len(self.dataset["frames"][file_index])))  # pick a random target from the welding part's xml
-        target_index = 0
+        #target_index = 0
+        #target_index = 74
+        print(file_index, target_index)
         self._set_target(file_index, target_index)
+        self._set_target_box(self.ee_pos_reward_thresh)
+        if self.show_target:
+            self._show_target()
 
         # load in the robot, the correct tool was set above while setting the target
         if self.tool:
@@ -167,8 +183,9 @@ class PathingEnvironmentPybullet(gym.Env):
         self.pos = np.array(ee_link_state[4])
         self.pos_last = self.pos
         self.rot = np.array(ee_link_state[5])
+        self.rot_internal = np.array(ee_link_state[1])
         self.joints = self.resting_pose_angles
-        self.lidar_probe = self._get_lidar_probe()
+        self.lidar_probe = self._get_lidar_indicator()
 
         if self.train and self.episodes % self.ee_pos_reward_threshold_change_after_episodes == 0:
             success_rate = np.average(self.success_buffer)
@@ -200,10 +217,6 @@ class PathingEnvironmentPybullet(gym.Env):
         }
 
     def step(self, action):
-        
-        # all 6 elements of action are expected to be within [-1;1]
-        pos_delta = action[:3] * self.pos_speed
-        rpy_delta = action[3:] * self.rot_speed
 
         # get state info
         ee_link_state = pyb.getLinkState(self.robot, self.end_effector_link_id, computeForwardKinematics=True)
@@ -211,20 +224,35 @@ class PathingEnvironmentPybullet(gym.Env):
         self.pos_last = self.pos
         self.rot = np.array(ee_link_state[5])
 
-        # add the action to the current state
-        rot_rpy = util.quaternion_to_rpy(self.rot)
-        pos_desired = self.pos + pos_delta
-        rpy_desired = rot_rpy + rpy_delta
-        quat_desired = util.rpy_to_quaternion(rpy_desired)
+        if not self.use_joints:
+            # transform action
+            pos_delta = action[:3] * self.pos_speed
+            rpy_delta = action[3:] * self.rot_speed
 
-        # move the robot to the new positions and get the associated joint config
-        self.joints = self._movep(pos_desired, quat_desired)
+            # add the action to the current state
+            rot_rpy = util.quaternion_to_rpy(self.rot)
+            pos_desired = self.pos + pos_delta
+            rpy_desired = rot_rpy + rpy_delta
+            quat_desired = util.rpy_to_quaternion(rpy_desired)
+
+            # move the robot to the new positions and get the associated joint config
+            self.joints = self._movep(pos_desired, quat_desired)
+        else:
+            # transform action
+            joint_delta = action * self.joint_speed
+
+            # add action to current state
+            joints_desired = self.joints + joint_delta
+
+            # execute movement by setting the desired joint state
+            self.joints = self._movej(joints_desired)
 
         # get new state info
         ee_link_state = pyb.getLinkState(self.robot, self.end_effector_link_id, computeForwardKinematics=True)
-        self.pos = ee_link_state[4]
-        self.rot = ee_link_state[5]
-        self.lidar_probe = self._get_lidar_probe()
+        self.pos = np.array(ee_link_state[4])
+        self.rot = np.array(ee_link_state[5])
+        self.rot_internal = np.array(ee_link_state[1])
+        self.lidar_probe = self._get_lidar_indicator()
 
         # increment steps
         self.steps_current_episode += 1
@@ -243,6 +271,8 @@ class PathingEnvironmentPybullet(gym.Env):
         distance_cur = np.linalg.norm(self.target - self.pos)
         distance_last = np.linalg.norm(self.target - self.pos_last)
 
+        is_in_target_box = self._is_in_target_box()
+
         if not collided:
             if distance_cur < self.ee_pos_reward_thresh:
                 reward = 10
@@ -255,7 +285,7 @@ class PathingEnvironmentPybullet(gym.Env):
                 is_success = False
                 if distance_cur > distance_last:
                     # add a very small penalty if the distance increased in comparison to the last step
-                    reward += -0.0005 * distance_last
+                    reward -= 0.025 * distance_last
         else:
             reward = -10
             done = True
@@ -316,7 +346,7 @@ class PathingEnvironmentPybullet(gym.Env):
     
     def _set_joint_state(self, config):
         """
-        Debug method for setting the joints of the robot to a certain configuration. Will kill all physics, momentum, movement etc. going on.
+        Method for setting the joints of the robot to a certain configuration. Will kill all physics, momentum, movement etc. going on.
         """
         for i in range(len(self.joint_ids)):
             pyb.resetJointState(self.robot, self.joint_ids[i], config[i])
@@ -340,7 +370,7 @@ class PathingEnvironmentPybullet(gym.Env):
         pyb.resetBasePositionAndOrientation(self.robot, np.append(position, self.ceiling_mount_height), pyb.getQuaternionFromEuler([np.pi, 0, 0]))
 
     # methods taken almost 1:1 from ravens code, need to add proper attribution later TODO
-    def _movej(self, targj, speed):
+    def _movej(self, targj, speed=0.01):
         """
         Move UR5 to target joint configuration.
         Returns the reached joint config.
@@ -383,60 +413,75 @@ class PathingEnvironmentPybullet(gym.Env):
             upperLimits=self.joints_upper_limits.tolist(),
             jointRanges=self.joints_range.tolist(),
             restPoses=np.float32(self.resting_pose_angles).tolist(),
-            maxNumIterations=50,
+            maxNumIterations=2000,
             residualThreshold=5e-3)
         joints = np.float32(joints)
-        joints[2:] = (joints[2:] + np.pi) % (2 * np.pi) - np.pi
+        #joints[2:] = (joints[2:] + np.pi) % (2 * np.pi) - np.pi
         return joints
 
-    def _set_lidar_cylinder(self, ray_min=0.02, ray_max=0.4, ray_num_ver=6, ray_num_hor=12, render=False):
+    def _cast_lidar_rays(self, ray_min=0.02, ray_max=0.1, ray_num_side=6, ray_num_forward=12, render=False):
+        """
+        Casts rays from various positions on the torch and receives collision information from that. Currently only adjusted for the MRW tool.
+        """
         ray_froms = []
         ray_tops = []
-        frame = util.quaternion_to_matrix(self.rot)
-        frame[0:3,3] = self.pos
-        ray_froms.append(np.matmul(np.asarray(frame),np.array([0.0,0.0,0.01,1]).T)[0:3].tolist())
-        ray_tops.append(np.matmul(np.asarray(frame),np.array([0.0,0.0,ray_max,1]).T)[0:3].tolist())
+        # get the frame of the torch tip
+        frame_torch_tip = util.quaternion_to_matrix(util.quaternion_multiply(self._quat_ee_to_w(self.rot_internal), np.array([ 0, 1, 0, 0 ])))
+        frame_torch_tip[0:3,3] = self.pos
+        # get the frame of the torch grip
+        frame_torch_grip = util.quaternion_to_matrix(self.rot)
+        frame_torch_grip[0:3,3] = self.pos
+
+        # cast a ray from the tip of the torch straight down
+        ray_froms.append(np.matmul(np.asarray(frame_torch_tip),np.array([0.0,0.0,0.01,1]).T)[0:3].tolist())
+        ray_tops.append(np.matmul(np.asarray(frame_torch_tip),np.array([0.0,0.0,ray_max,1]).T)[0:3].tolist())
 
 
+        # cast rays from the torch tip in a cone in forward direction
         for angle in range(230, 270, 20):
-            for i in range(ray_num_hor):
+            for i in range(ray_num_forward):
                 z = -ray_max * np.sin(angle*np.pi/180)
                 l = ray_max * np.cos(angle*np.pi/180)
-                x_end = l*np.cos(2*np.pi*float(i)/ray_num_hor)
-                y_end = l*np.sin(2*np.pi*float(i)/ray_num_hor)
-                start = np.matmul(np.asarray(frame),np.array([0.0,0.0,0.01,1]).T)[0:3].tolist()
-                end = np.matmul(np.asarray(frame),np.array([x_end,y_end,z,1]).T)[0:3].tolist()
+                x_end = l*np.cos(2*np.pi*float(i)/ray_num_forward)
+                y_end = l*np.sin(2*np.pi*float(i)/ray_num_forward)
+                start = np.matmul(np.asarray(frame_torch_tip),np.array([0.0,0.0,0.01,1]).T)[0:3].tolist()
+                end = np.matmul(np.asarray(frame_torch_tip),np.array([x_end,y_end,z,1]).T)[0:3].tolist()
                 ray_froms.append(start)
                 ray_tops.append(end)
         
         # set the angle of rays
         interval = -0.005
         
+        # cast rays from the tip horizontally around the torch tip 
         for i in range(8):
             ai = i*np.pi/4
-            for angle in range(ray_num_ver):    
-                z_start = (angle)*interval-0.1
+            for angle in range(ray_num_side):    
+                z_start = (angle)*interval-0.01
                 x_start = ray_min*np.cos(ai)
                 y_start = ray_min*np.sin(ai)
-                start = np.matmul(np.asarray(frame),np.array([x_start,y_start,z_start,1]).T)[0:3].tolist()
-                z_end = (angle)*interval-0.1
+                start = np.matmul(np.asarray(frame_torch_tip),np.array([x_start,y_start,z_start,1]).T)[0:3].tolist()
+                z_end = (angle)*interval-0.01
                 x_end = ray_max*np.cos(ai)
                 y_end = ray_max*np.sin(ai)
-                end = np.matmul(np.asarray(frame),np.array([x_end,y_end,z_end,1]).T)[0:3].tolist()
+                end = np.matmul(np.asarray(frame_torch_tip),np.array([x_end,y_end,z_end,1]).T)[0:3].tolist()
                 ray_froms.append(start)
                 ray_tops.append(end)
-        
-        for angle in range(250, 270, 20):
-            for i in range(ray_num_hor):
-                z = -0.2+ray_max * np.sin(angle*np.pi/180)
-                l = ray_max * np.cos(angle*np.pi/180)
-                x_end = l*np.cos(np.pi*float(i)/ray_num_hor-np.pi/2)
-                y_end = l*np.sin(np.pi*float(i)/ray_num_hor-np.pi/2)
-                
-                start = np.matmul(np.asarray(frame),np.array([x_start,y_start,z_start-0.1,1]).T)[0:3].tolist()
-                end = np.matmul(np.asarray(frame),np.array([x_end,y_end,z,1]).T)[0:3].tolist()
+
+        # cast rays from the horizontally around the grip
+        for i in range(8):
+            ai = i*np.pi/4
+            for angle in range(ray_num_side):    
+                z_start = (angle)*interval - 0.05
+                x_start = ray_min*np.cos(ai) - 0.00
+                y_start = ray_min*np.sin(ai) - 0.03
+                start = np.matmul(np.asarray(frame_torch_grip),np.array([x_start,y_start,z_start,1]).T)[0:3].tolist()
+                z_end = (angle)*interval - 0.05
+                x_end = ray_max*np.cos(ai) - 0.00
+                y_end = ray_max*np.sin(ai) - 0.03
+                end = np.matmul(np.asarray(frame_torch_grip),np.array([x_end,y_end,z_end,1]).T)[0:3].tolist()
                 ray_froms.append(start)
                 ray_tops.append(end)
+
         results = pyb.rayTestBatch(ray_froms, ray_tops)
        
         if render:
@@ -452,31 +497,77 @@ class PathingEnvironmentPybullet(gym.Env):
                     pyb.addUserDebugLine(ray_froms[index], ray_tops[index], hitRayColor)
         return results
 
-    def _get_lidar_probe(self):
-        lidar_results = self._set_lidar_cylinder()
-        obs_rays = np.zeros(shape=(85,),dtype=np.float32)
-        indicator = np.zeros((10,), dtype=np.float32)
-        for i, ray in enumerate(lidar_results):
-            obs_rays[i] = ray[2]
-        rays_sum = []
-        rays_sum.append(obs_rays[0:25])
-        rays_sum.append(obs_rays[25:31])
-        rays_sum.append(obs_rays[31:37])
-        rays_sum.append(obs_rays[37:43])
-        rays_sum.append(obs_rays[43:49])
-        rays_sum.append(obs_rays[49:55])
-        rays_sum.append(obs_rays[55:61])
-        rays_sum.append(obs_rays[61:67])
-        rays_sum.append(obs_rays[67:73])
-        rays_sum.append(obs_rays[73:])
-        for i in range(10):
-            if rays_sum[i].min()>=0.99:
-                indicator[i] = 0
-            if 0.5<rays_sum[i].min()<0.99:
-                indicator[i] = 1
-            if rays_sum[i].min()<=0.5:
-                indicator[i] = 2
+    def _get_lidar_indicator(self):
+        ray_num_side=6
+        ray_num_forward=12
+        lidar_results = np.array(self._cast_lidar_rays(ray_num_side=ray_num_side, ray_num_forward=ray_num_forward), dtype=object)[:,2]  # only use the distance information
+        indicator = np.zeros((17,), dtype=np.float32)
+        # side note: the array slices here are very complicated, but they basically just count up the rays in the order they are in the lidar_results object
+        # as pybullet will output them in the lider_cylinder method. Instead of hardcoding the slices they are kept as variables such that the amount of rays can be changed at will
+        # tip front indicator
+        lidar_min = lidar_results[0:(2 * ray_num_forward + 1)].min()
+        indicator[0] = 0 if lidar_min >= 0.99 else (1 if 0.5 < lidar_min < 0.99 else 2)
+        # tip sides indicators
+        for i in range(8):
+            lidar_min = lidar_results[(2 * ray_num_forward + 1 + i * ray_num_side):(2 * ray_num_forward + 1 + (i + 1) * ray_num_side)].min()
+            indicator[1+i] = 0 if lidar_min >= 0.99 else (1 if 0.5 < lidar_min < 0.99 else 2)
+        # grip sides indicators
+        for i in range(8):
+            lidar_min = lidar_results[(2 * ray_num_forward + 1 + 8 * ray_num_side + i * ray_num_side):(2 * ray_num_forward + 1 + 8 * ray_num_side + (i + 1) * ray_num_side)].min()
+            indicator[1+i] = 0 if lidar_min >= 0.99 else (1 if 0.5 < lidar_min < 0.99 else 2)
         return indicator
+
+    def _is_in_target_box(self):
+        pass
+
+    def _set_target_box(self, dist):
+        """
+        Method for determining the size of the bounds of target box (where full reward is given).
+        Uses Pybullet raycasting to determine the bounds and position of the box.
+        This is necessary to make sure that the box doesn't cut into a mesh and gives full reward to a spot where the torch has no direct path to the actual target itself.
+        """
+        # get the norms from the target
+        # and also calculate the vectors perpendicular to the two norms
+        norms = [self.target_norms[0], self.target_norms[1], np.cross(self.target_norms[0], self.target_norms[1]), -np.cross(self.target_norms[0], self.target_norms[1])]      
+
+        # info: the way the norms are given in the source files makes it such that the crossproduct of both will always be parallel to a wall while the norms point up and away
+        # that's why we also need the negative crossproduct, to cast a ray into the other direction as well
+        # for the other two norms we're only interested in positive direction, because negative direction will immediately hit the mesh where the welding seam is sitting on
+        
+        # the three vectors can be taken to represent a rotation, get the matrix for it
+        transform = np.zeros((3,3))
+        transform[0:3,0] = norms[0]
+        transform[0:3,1] = norms[1]
+        transform[0:3,2] = norms[2]
+
+        # now we can get the associated quaternion
+        # which tells us how to transform coordinates in world frame to the frame implied by the target norms
+        # this is useful for easily checking if a position is within the target box or not, especially if it's rotated w.r.t the world frame
+        self.target_transform = util.matrix_to_quaternion(transform)
+
+        # now use the norms to cast rays to determine the maximum possible extent of the target box
+        dist = 0.5
+        ray_starts = [(self.target).tolist() for i in range(4)]
+        ray_ends = [(self.target + norms[i] * dist).tolist() for i in range(4)]
+        ray_results = np.array(pyb.rayTestBatch(ray_starts, ray_ends), dtype=object)[:,2]  # only extract the hitfraction
+
+        # sometimes the target position is such that some rays will immediately hit a wall, giving all results as zero
+        # in that case, move the starting point of the rays slightly further inward along the norms
+        norm_between = norms[0] + norms[1]
+        norm_between = norm_between / np.linalg.norm(norm_between)
+        j = 1
+        while np.any(ray_results == 0):
+            ray_starts = [(self.target + j*0.01*norm_between).tolist() for i in range(4)]
+            ray_results = np.array(pyb.rayTestBatch(ray_starts, ray_ends), dtype=object)[:,2]
+            j += 1
+
+        self.target_x_max = dist * ray_results[0]
+        self.target_y_max = dist * ray_results[1]
+        self.target_p_z_max = dist * ray_results[2]
+        self.target_m_z_max = -dist * ray_results[3]
+
+
+
 
     ###################
     # utility methods #
@@ -510,18 +601,68 @@ class PathingEnvironmentPybullet(gym.Env):
         frame = self.dataset["frames"][file_index][target_index]
         self.tool = 1 if frame["torch"][3] == "TAND_GERAD_DD" else 0
         positions = [ele["position"] * self.pybullet_mesh_scale_factor + self.xyz_offset for ele in frame["weld_frames"]]
-        self.target = positions[0]
+        norms = [ele["norm"] for ele in frame["weld_frames"]]
+        self.target = np.array(positions[0])
+        self.target_norms = norms[0]
         self.target_base = np.average(positions, axis=0)[:2] + self.base_offset
-        if self.show_target:
-            self._show_target()
 
     def _show_target(self):
         """
-        Creates a green ball around the target of the size of the reward threshold
+        Creates a visual indicator around the target in the rendered Pybullet simulation
         """
-        visual_id = pyb.createVisualShape(shapeType=pyb.GEOM_SPHERE, radius=self.ee_pos_reward_thresh, rgbaColor=[0, 1, 0, 1])
-        point_id = pyb.createMultiBody(
-                    baseMass=0,
-                    baseVisualShapeIndex=visual_id,
-                    basePosition=self.target,
-                    )
+        #visual_id = pyb.createVisualShape(shapeType=pyb.GEOM_SPHERE, radius=self.ee_pos_reward_thresh, rgbaColor=[0, 1, 0, 1])
+        #point_id = pyb.createMultiBody(
+        #            baseMass=0,
+        #            baseVisualShapeIndex=visual_id,
+        #            basePosition=self.target,
+        #            )
+        
+        # calculate the center point such that the rectangle will be displayed in the correct way
+        # this is necessary because the pybullet interface for boxes works with halflenghts emanating from the center
+        center_in_target_frame = np.array([self.target_x_max/2.0, 
+                                        self.target_y_max/2.0,
+                                        (self.target_m_z_max + self.target_p_z_max)/2.0])  # the target in target frame is of course 0,0,0, so no need to add it here
+        #center_in_world_frame = util.rotate_vec(util.quaternion_invert(self.target_transform), center_in_target_frame) + self.target
+        center_in_world_frame = util.rotate_vec(self.target_transform, center_in_target_frame) + self.target
+        halfExtents = [self.target_x_max/2.0, self.target_y_max/2.0, (np.abs(self.target_m_z_max) + self.target_p_z_max)/2.0]
+        third_dim = np.cross(self.target_norms[0], self.target_norms[1])
+        box = pyb.createVisualShape(shapeType=pyb.GEOM_BOX, halfExtents=halfExtents)
+        pyb.createMultiBody(baseVisualShapeIndex=box, basePosition=center_in_world_frame, baseOrientation=self.target_transform)
+
+        pyb.addUserDebugLine(self.target, self.target+third_dim, [0,0,1])
+        pyb.addUserDebugLine(self.target, np.array(self.target)+np.array(self.target_norms[0]),[1,0,0])
+        pyb.addUserDebugLine(self.target, np.array(self.target)+np.array(self.target_norms[1]),[0,1,0])
+
+    def _quat_w_to_ee(self, quat):
+        """
+        Takes an input quaternion in the world frame, rotates it such that it offsets the rotation of the welding torch
+        (meaning that a [0,0,0,1] input quaternion for the robot arm ee results in the same pose of the torch as loading it with the loadURDF method would) 
+        and transforms it into the end effector frame (meaning that that inputs result in the correct rotation w.r.t the world frame)
+        """
+
+        # get offset
+        offset = self.ground_truth_conversion_angles[self.tool]
+
+        # rotate the user input by the offset (the torch will now be positioned like when its original mesh is loaded by the loadURDF method if input is [0, 0, 0, 1])
+        middle_quat = util.quaternion_multiply(offset, quat)
+        # however, the coordinate system is still wrongly aligned, so we will have to switch systems by multiplying through the offset
+        # this will make it so that our input (quat) rotates around the axes of the world coordinate system instead of the world axes rotated by the offset
+        offset = util.quaternion_invert(offset)
+        res = util.quaternion_multiply(offset, middle_quat)
+        res = util.quaternion_multiply(res, util.quaternion_invert(offset))
+
+        return res
+
+    def _quat_ee_to_w(self, quat):
+        """
+        Same as above, just from end effector frame to world frame.
+        """
+
+        offset = self.ground_truth_conversion_angles[self.tool]
+
+        tmp = util.quaternion_multiply(offset, quat)
+        tmp = util.quaternion_multiply(tmp, util.quaternion_invert(offset))
+
+        res = util.quaternion_multiply(util.quaternion_invert(offset), tmp)
+
+        return res

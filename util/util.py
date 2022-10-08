@@ -175,6 +175,14 @@ def exp_decay_alt(x, max, half):
     return max*np.exp((np.log(1/2)/half)*x)
 
 def rotate_vec(quat, vec):
+    im_part = np.array(quat[:3])
+    re_part = quat[3]
+
+    # this is apparently way more efficient than the naive multiplication below
+    # see https://gamedev.stackexchange.com/a/50545
+    res = 2.0 * np.dot(im_part, vec) * im_part + (re_part * re_part - np.dot(im_part, im_part)) * vec + 2.0 * re_part * np.cross(im_part, vec)  
+    return res
+
     work_vec = np.array([vec[0], vec[1], vec[2], 0])
     return quaternion_multiply(quaternion_multiply(quat, work_vec), quaternion_invert(quat))[:3]
 
