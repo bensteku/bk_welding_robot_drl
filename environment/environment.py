@@ -11,7 +11,8 @@ class PathingEnvironmentPybullet(gym.Env):
                 train=False,
                 use_joints=False,
                 display=False,
-                show_target=False):
+                show_target=False,
+                ignore_obstacles_for_target_box=False):
 
         # eval or train mode
         self.train = train
@@ -30,6 +31,9 @@ class PathingEnvironmentPybullet(gym.Env):
 
         # tool mounted to the robot, 0: MRW510, 1: TAND GERAD
         self.tool = 0
+
+        # attribute for target box, see its method
+        self.ignore_obstacles_for_target_box = ignore_obstacles_for_target_box
 
         # pybullet robot constants
         self.resting_pose_angles = np.array([0, -0.5, 0.75, -1, 0.5, 0.5]) * np.pi  # resting pose angles for the kr16
@@ -76,7 +80,7 @@ class PathingEnvironmentPybullet(gym.Env):
             self.ee_pos_reward_threshold_change_after_episodes = 50
             self.success_buffer = []
         else:
-            self.ee_pos_reward_thresh = 5e-3
+            self.ee_pos_reward_thresh = 1e-2
 
         # variables storing information about the current state, saves performance from having to 
         # access the pybullet interface all the time
@@ -154,14 +158,11 @@ class PathingEnvironmentPybullet(gym.Env):
         # load in the mesh of the welding part
         # info: the method will load the mesh at given index within the self.dataset variable
         file_index = np.random.choice(range(len(self.dataset["filenames"]))) 
-        #file_index = self.dataset["filenames"].index("201910204483_R1.urdf")
-        #file_index = 314
+        file_index = self.dataset["filenames"].index("201910204483_R1.urdf")
         self._add_object("objects/"+self.dataset["filenames"][file_index], self.xyz_offset)
         # set the target and base target
         target_index = np.random.choice(range(len(self.dataset["frames"][file_index])))  # pick a random target from the welding part's xml
-        #target_index = 0
-        #target_index = 74
-        print(file_index, target_index)
+        target_index = 0
         self._set_target(file_index, target_index)
         self._set_target_box(self.ee_pos_reward_thresh)
         if self.show_target:
@@ -271,10 +272,9 @@ class PathingEnvironmentPybullet(gym.Env):
         distance_cur = np.linalg.norm(self.target - self.pos)
         distance_last = np.linalg.norm(self.target - self.pos_last)
 
-        is_in_target_box = self._is_in_target_box()
-
         if not collided:
-            if distance_cur < self.ee_pos_reward_thresh:
+            #if distance_cur < self.ee_pos_reward_thresh:
+            if self._is_in_target_box():
                 reward = 10
                 done = True
                 is_success = True
@@ -285,7 +285,7 @@ class PathingEnvironmentPybullet(gym.Env):
                 is_success = False
                 if distance_cur > distance_last:
                     # add a very small penalty if the distance increased in comparison to the last step
-                    reward -= 0.025 * distance_last
+                    reward -= 0.005 * distance_last
         else:
             reward = -10
             done = True
@@ -505,7 +505,7 @@ class PathingEnvironmentPybullet(gym.Env):
         # side note: the array slices here are very complicated, but they basically just count up the rays in the order they are in the lidar_results object
         # as pybullet will output them in the lider_cylinder method. Instead of hardcoding the slices they are kept as variables such that the amount of rays can be changed at will
         # tip front indicator
-        lidar_min = lidar_results[0:(2 * ray_num_forward + 1)].min()
+        lidar_min = lidar_results[0:(2 * ray_num_forward + 1)].min()  # 1 ray going straight forward + 2 cones of ray_num_forward rays around it
         indicator[0] = 0 if lidar_min >= 0.99 else (1 if 0.5 < lidar_min < 0.99 else 2)
         # tip sides indicators
         for i in range(8):
@@ -518,17 +518,43 @@ class PathingEnvironmentPybullet(gym.Env):
         return indicator
 
     def _is_in_target_box(self):
-        pass
+        """
+        Returns a bool that indicates whether the current position is within the target box or not.
+        """
+        # first transform the current position into the target frame
+        # this makes checking wether it's in the box the much easier
+        position_in_target_frame = util.rotate_vec(self.target_transform, (self.pos - self.target))
 
-    def _set_target_box(self, dist):
+        # now check for all three directions
+        if position_in_target_frame[0] < 0 or position_in_target_frame[0] > self.target_x_max:  # less than 0 would be in the mesh or behind it
+            return False
+        if position_in_target_frame[1] < 0 or position_in_target_frame[1] > self.target_y_max:  # dito
+            return False
+        if position_in_target_frame[2] < self.target_m_z_max or position_in_target_frame[2] > self.target_p_z_max:  # for the constructed z-axis both directions are fine
+            return False
+        return True 
+
+    def _set_target_box(self, dist, extend_z_axis=True):
         """
         Method for determining the size of the bounds of target box (where full reward is given).
         Uses Pybullet raycasting to determine the bounds and position of the box.
         This is necessary to make sure that the box doesn't cut into a mesh and gives full reward to a spot where the torch has no direct path to the actual target itself.
+        The extend_z_axis parameter will make it such that the box is 1.5x longer in (world) z direction, such that the robot has an easier time finding the target from above (or below even). 
+        This will not be applied to the third axis in target frame as it would in many cases lead to the box crossing through mesh walls.
         """
         # get the norms from the target
         # and also calculate the vectors perpendicular to the two norms
-        norms = [self.target_norms[0], self.target_norms[1], np.cross(self.target_norms[0], self.target_norms[1]), -np.cross(self.target_norms[0], self.target_norms[1])]      
+        norms = [self.target_norms[0], self.target_norms[1], np.cross(self.target_norms[0], self.target_norms[1]), -np.cross(self.target_norms[0], self.target_norms[1])]   
+
+        # calculate which of the three norms is most aligned with world z axis, this is used later on
+        z_axis = np.array([0, 0, 1])
+        z_axis_norm = 0
+        z_axis_score = -2
+        for i, norm in enumerate(norms):
+            cos_sim = util.cosine_similarity(z_axis, norm)
+            if cos_sim > z_axis_score:
+                z_axis_score = cos_sim
+                z_axis_norm = i
 
         # info: the way the norms are given in the source files makes it such that the crossproduct of both will always be parallel to a wall while the norms point up and away
         # that's why we also need the negative crossproduct, to cast a ray into the other direction as well
@@ -545,26 +571,32 @@ class PathingEnvironmentPybullet(gym.Env):
         # this is useful for easily checking if a position is within the target box or not, especially if it's rotated w.r.t the world frame
         self.target_transform = util.matrix_to_quaternion(transform)
 
-        # now use the norms to cast rays to determine the maximum possible extent of the target box
-        dist = 0.5
-        ray_starts = [(self.target).tolist() for i in range(4)]
-        ray_ends = [(self.target + norms[i] * dist).tolist() for i in range(4)]
-        ray_results = np.array(pyb.rayTestBatch(ray_starts, ray_ends), dtype=object)[:,2]  # only extract the hitfraction
+        # now use the norms to cast rays to determine the maximum possible extent of the target box if so desired
+        scale_factor = 1.5
+        if not self.ignore_obstacles_for_target_box:
+            ray_starts = [(self.target).tolist() for i in range(4)]
+            ray_ends = [(self.target + norms[i] * dist).tolist() for i in range(4)]
+            ray_results = np.array(pyb.rayTestBatch(ray_starts, ray_ends), dtype=object)[:,2]  # only extract the hitfraction
 
-        # sometimes the target position is such that some rays will immediately hit a wall, giving all results as zero
-        # in that case, move the starting point of the rays slightly further inward along the norms
-        norm_between = norms[0] + norms[1]
-        norm_between = norm_between / np.linalg.norm(norm_between)
-        j = 1
-        while np.any(ray_results == 0):
-            ray_starts = [(self.target + j*0.01*norm_between).tolist() for i in range(4)]
-            ray_results = np.array(pyb.rayTestBatch(ray_starts, ray_ends), dtype=object)[:,2]
-            j += 1
+            # sometimes the target position is such that some rays will immediately hit a wall, giving all results as zero
+            # in that case, move the starting point of the rays slightly further inward along the norms
+            norm_between = norms[0] + norms[1]
+            norm_between = norm_between / np.linalg.norm(norm_between)
+            j = 1
+            while np.any(ray_results == 0):
+                ray_starts = [(self.target + j*0.01*norm_between).tolist() for i in range(4)]
+                ray_results = np.array(pyb.rayTestBatch(ray_starts, ray_ends), dtype=object)[:,2]
+                j += 1
 
-        self.target_x_max = dist * ray_results[0]
-        self.target_y_max = dist * ray_results[1]
-        self.target_p_z_max = dist * ray_results[2]
-        self.target_m_z_max = -dist * ray_results[3]
+            self.target_x_max = dist * ray_results[0] if z_axis_norm !=0 else dist * ray_results[0] * scale_factor
+            self.target_y_max = dist * ray_results[1] if z_axis_norm !=1 else dist * ray_results[1] * scale_factor
+            self.target_p_z_max = dist * ray_results[2]
+            self.target_m_z_max = -dist * ray_results[3]
+        else:
+            self.target_x_max = dist if z_axis_norm !=0 else dist * scale_factor
+            self.target_y_max = dist if z_axis_norm !=1 else dist * scale_factor
+            self.target_p_z_max = dist/2 if z_axis_norm !=2 else dist * scale_factor
+            self.target_m_z_max = -dist/2 if z_axis_norm !=2 else dist * scale_factor
 
 
 
@@ -626,7 +658,7 @@ class PathingEnvironmentPybullet(gym.Env):
         center_in_world_frame = util.rotate_vec(self.target_transform, center_in_target_frame) + self.target
         halfExtents = [self.target_x_max/2.0, self.target_y_max/2.0, (np.abs(self.target_m_z_max) + self.target_p_z_max)/2.0]
         third_dim = np.cross(self.target_norms[0], self.target_norms[1])
-        box = pyb.createVisualShape(shapeType=pyb.GEOM_BOX, halfExtents=halfExtents)
+        box = pyb.createVisualShape(shapeType=pyb.GEOM_BOX, halfExtents=halfExtents, rgbaColor=[0, 1, 0, 1])
         pyb.createMultiBody(baseVisualShapeIndex=box, basePosition=center_in_world_frame, baseOrientation=self.target_transform)
 
         pyb.addUserDebugLine(self.target, self.target+third_dim, [0,0,1])
