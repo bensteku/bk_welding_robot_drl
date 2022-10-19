@@ -3,6 +3,7 @@ import pybullet as pyb
 import numpy as np
 from util import xml_parser, util
 import os
+import pickle
 
 class PathingEnvironmentPybullet(gym.Env):
 
@@ -12,7 +13,11 @@ class PathingEnvironmentPybullet(gym.Env):
                 use_joints=False,
                 display=False,
                 show_target=False,
-                ignore_obstacles_for_target_box=False):
+                ignore_obstacles_for_target_box=False,
+                id=0):
+
+        # id, default is 0, but can be another number, used for running several envs in parallel
+        self.id = id
 
         # eval or train mode
         self.train = train
@@ -59,9 +64,9 @@ class PathingEnvironmentPybullet(gym.Env):
         self.rot_speed = 0.00001 
         # if use_joints is set to true:
         # maximum joint movement per step
-        self.joint_speed = 0.001
+        self.joint_speed = 0.01
 
-        # offset at wich welding meshes will be placed into the world
+        # offset at which welding meshes will be placed into the world
         self.xyz_offset = np.array([0, 0, 0])  # all zero for now, might change later on
         # scale factor for the meshes in the pybullet environment
         self.pybullet_mesh_scale_factor = 0.0005
@@ -73,7 +78,7 @@ class PathingEnvironmentPybullet(gym.Env):
         # == a sphere around the target where maximum reward is applied
         # is modified in the course of training
         if self.train:
-            self.ee_pos_reward_thresh = 3e-1
+            self.ee_pos_reward_thresh = 6e-1
             self.ee_pos_reward_thresh_min = 4e-3
             self.ee_pos_reward_thresh_max = 6e-1
             self.ee_pos_reward_thresh_increments = 1e-2
@@ -101,9 +106,9 @@ class PathingEnvironmentPybullet(gym.Env):
         self.steps_total = 0
         # maximum steps per episode
         if self.train:
-            self.maximum_steps_per_episode = 1024
+            self.max_episode_steps = 1024
         else:
-            self.maximum_steps_per_episode = 512  # reduce the overhead for model evaluation
+            self.max_episode_steps = 512  # reduce the overhead for model evaluation
         # episode counter
         self.episodes = 0
         self.episode_reward = 0
@@ -116,14 +121,32 @@ class PathingEnvironmentPybullet(gym.Env):
         self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(6,), dtype=np.float32)
 
         # gym observation space
-        # spatial: 1-6: current joint angles, 7-9: difference between target and current position, 10-13: current rotation as quaternion, 14: distance between target and position
+        # spatial: 1-6: current joint angles, 7-9: vector difference between target and current position, 10-13: current rotation as quaternion, 14: distance between target and position, all normalized to be between -1 and 1 for deep learning
         # lidar: 10 ints that signify occupancy around the ee
         self.observation_space = gym.spaces.Dict(
             {
-              'spatial': gym.spaces.Box(low=-2, high=2, shape=(14,), dtype=np.float32),
-              'lidar': gym.spaces.Box(low=0, high=2, shape=(17,), dtype=np.int8)  
+              'spatial': gym.spaces.Box(low=-1, high=1, shape=(14,), dtype=np.float32),
+              'lidar': gym.spaces.Box(low=-1, high=1, shape=(17,), dtype=np.int8)  
             }
         )
+        # workspace bounds
+        self.x_max = 8
+        self.y_max = 8
+        self.z_max = 1.8
+        # constants to make normalizing more efficient
+        max_distance = np.ceil(np.sqrt(self.x_max**2 + self.y_max**2 + self.z_max**2))  # this is the maximum possible distance given the workspace
+        vec_distance_max = np.array([self.x_max, self.y_max, self.z_max])
+        vec_distance_min = -1 * vec_distance_max
+        self.normalizing_constant_a = np.zeros(14)
+        self.normalizing_constant_a[:6] = 2 / self.joints_range
+        self.normalizing_constant_a[6:9] = 2 / (vec_distance_max - vec_distance_min)
+        self.normalizing_constant_a[9:13] = 0  # unit quaternions are already normalized
+        self.normalizing_constant_a[13] = 2 / max_distance 
+        self.normalizing_constant_b = np.zeros(14)
+        self.normalizing_constant_b[:6] = np.ones(6) - np.multiply(self.normalizing_constant_a[:6], self.joints_upper_limits)
+        self.normalizing_constant_b[6:9] = np.ones(3) - np.multiply(self.normalizing_constant_a[6:9], vec_distance_max)
+        self.normalizing_constant_b[9:13] = 0
+        self.normalizing_constant_b[13] = 1 - self.normalizing_constant_a[13] * max_distance
 
         # pybullet connection and setup
         disp = pyb.DIRECT  # direct <-> no gui, use for training
@@ -159,14 +182,16 @@ class PathingEnvironmentPybullet(gym.Env):
         # info: the method will load the mesh at given index within the self.dataset variable
         file_index = np.random.choice(range(len(self.dataset["filenames"]))) 
         file_index = self.dataset["filenames"].index("201910204483_R1.urdf")
-        self._add_object("objects/"+self.dataset["filenames"][file_index], self.xyz_offset)
+        #self._add_object("objects/"+self.dataset["filenames"][file_index], self.xyz_offset)
         # set the target and base target
         target_index = np.random.choice(range(len(self.dataset["frames"][file_index])))  # pick a random target from the welding part's xml
-        target_index = 0
+        #target_index = 0
         self._set_target(file_index, target_index)
         self._set_target_box(self.ee_pos_reward_thresh)
         if self.show_target:
             self._show_target()
+        #tmp
+        self.tool=0
 
         # load in the robot, the correct tool was set above while setting the target
         if self.tool:
@@ -189,11 +214,11 @@ class PathingEnvironmentPybullet(gym.Env):
         self.lidar_probe = self._get_lidar_indicator()
 
         if self.train and self.episodes % self.ee_pos_reward_threshold_change_after_episodes == 0:
-            success_rate = np.average(self.success_buffer)
+            success_rate = np.average(self.success_buffer) if len(self.success_buffer) != 0 else 0
             if success_rate < 0.8 and self.ee_pos_reward_thresh < self.ee_pos_reward_thresh_max:
                 self.ee_pos_reward_thresh += self.ee_pos_reward_thresh_increments/4
             elif success_rate > 0.8 and self.ee_pos_reward_thresh > self.ee_pos_reward_thresh_min:
-                self.ee_pos_reward_thresh -= self.ee_pos_reward_thresh_increments
+                self.ee_pos_reward_thresh -= self.ee_pos_reward_thresh_increments/2
             if self.ee_pos_reward_thresh < self.ee_pos_reward_thresh_min:
                 self.ee_pos_reward_thresh = self.ee_pos_reward_thresh_min
             if self.ee_pos_reward_thresh > self.ee_pos_reward_thresh_max:
@@ -207,10 +232,10 @@ class PathingEnvironmentPybullet(gym.Env):
 
     def _get_obs(self):
         spatial = np.zeros(14)
-        spatial[:6] = self.joints
-        spatial[6:9] = self.target - self.pos
+        spatial[:6] = np.multiply(self.normalizing_constant_a[:6], self.joints) + self.normalizing_constant_b[:6]
+        spatial[6:9] = np.multiply(self.normalizing_constant_a[6:9], (self.target - self.pos)) + self.normalizing_constant_b[6:9]
         spatial[9:13] = self.rot
-        spatial[13] = np.linalg.norm(self.target - self.pos)
+        spatial[13] = self.normalizing_constant_a[13] * np.linalg.norm(self.target - self.pos) + self.normalizing_constant_b[13]
 
         return {
             'spatial': spatial,
@@ -272,7 +297,12 @@ class PathingEnvironmentPybullet(gym.Env):
         distance_cur = np.linalg.norm(self.target - self.pos)
         distance_last = np.linalg.norm(self.target - self.pos_last)
 
-        if not collided:
+        # check if out of bounds
+        if self._is_out_of_bounds():
+            done = True
+            is_success = False
+            reward = -30
+        elif not collided:
             #if distance_cur < self.ee_pos_reward_thresh:
             if self._is_in_target_box():
                 reward = 10
@@ -287,11 +317,11 @@ class PathingEnvironmentPybullet(gym.Env):
                     # add a very small penalty if the distance increased in comparison to the last step
                     reward -= 0.005 * distance_last
         else:
-            reward = -10
+            reward = -15
             done = True
             is_success = False
 
-        if self.steps_current_episode > self.maximum_steps_per_episode:
+        if self.steps_current_episode > self.max_episode_steps:
             done = True
 
         if self.train:
@@ -309,16 +339,20 @@ class PathingEnvironmentPybullet(gym.Env):
             'episodes': self.episodes,
             'done': done,
             'is_success': is_success,
-            'success_rate': self.successes/self.episodes,
+            'success_rate': self.successes/self.episodes if not self.train else np.average(self.success_buffer),
             'collided': collided,
             'reward': reward,
             'episode_reward': self.episode_reward,
             'distance': distance_cur,
-            'episode_distance': self.episode_distance
+            'episode_distance': self.episode_distance,
+            'distance_threshold': self.ee_pos_reward_thresh
         }
 
         if done:
-            print(info)
+            info_string = ""
+            for key in info:
+                info_string += key + ": " + str(round(info[key], 2)) + ", "
+            print(info_string)
 
         return reward, done, info
 
@@ -375,21 +409,25 @@ class PathingEnvironmentPybullet(gym.Env):
         Move UR5 to target joint configuration.
         Returns the reached joint config.
         """
-        currj = self._get_joint_state()
-        diffj = targj - currj
-        while any(np.abs(diffj) > 1e-2):
-            # Move with constant velocity
-            norm = np.linalg.norm(diffj)
-            if norm > speed:
-                v = diffj / norm
-                stepj = currj + v * speed
-            else:
-                stepj = currj + diffj
-            self._set_joint_state(stepj)
-
-            currj = stepj
+        if self.train:  # if we're training intermediate steps are not necessary
+            self._set_joint_state(targj)
+            return targj
+        else:
+            currj = self._get_joint_state()
             diffj = targj - currj
-        return currj
+            while any(np.abs(diffj) > 1e-5):
+                # Move with constant velocity
+                norm = np.linalg.norm(diffj)
+                if norm > speed:
+                    v = diffj / norm
+                    stepj = currj + v * speed
+                else:
+                    stepj = currj + diffj
+                self._set_joint_state(stepj)
+
+                currj = stepj
+                diffj = targj - currj
+            return currj
 
     def _movep(self, position, rotation, speed=0.01):
         """
@@ -419,7 +457,7 @@ class PathingEnvironmentPybullet(gym.Env):
         #joints[2:] = (joints[2:] + np.pi) % (2 * np.pi) - np.pi
         return joints
 
-    def _cast_lidar_rays(self, ray_min=0.02, ray_max=0.1, ray_num_side=6, ray_num_forward=12, render=False):
+    def _cast_lidar_rays(self, ray_min=0.02, ray_max=0.05, ray_num_side=6, ray_num_forward=12, render=False):
         """
         Casts rays from various positions on the torch and receives collision information from that. Currently only adjusted for the MRW tool.
         """
@@ -506,15 +544,15 @@ class PathingEnvironmentPybullet(gym.Env):
         # as pybullet will output them in the lider_cylinder method. Instead of hardcoding the slices they are kept as variables such that the amount of rays can be changed at will
         # tip front indicator
         lidar_min = lidar_results[0:(2 * ray_num_forward + 1)].min()  # 1 ray going straight forward + 2 cones of ray_num_forward rays around it
-        indicator[0] = 0 if lidar_min >= 0.99 else (1 if 0.5 < lidar_min < 0.99 else 2)
+        indicator[0] = 1 if lidar_min >= 0.99 else (0 if 0.5 < lidar_min < 0.99 else -1)
         # tip sides indicators
         for i in range(8):
             lidar_min = lidar_results[(2 * ray_num_forward + 1 + i * ray_num_side):(2 * ray_num_forward + 1 + (i + 1) * ray_num_side)].min()
-            indicator[1+i] = 0 if lidar_min >= 0.99 else (1 if 0.5 < lidar_min < 0.99 else 2)
+            indicator[1+i] = 1 if lidar_min >= 0.99 else (0 if 0.5 < lidar_min < 0.99 else -1)
         # grip sides indicators
         for i in range(8):
             lidar_min = lidar_results[(2 * ray_num_forward + 1 + 8 * ray_num_side + i * ray_num_side):(2 * ray_num_forward + 1 + 8 * ray_num_side + (i + 1) * ray_num_side)].min()
-            indicator[1+i] = 0 if lidar_min >= 0.99 else (1 if 0.5 < lidar_min < 0.99 else 2)
+            indicator[1+8+i] = 1 if lidar_min >= 0.99 else (0 if 0.5 < lidar_min < 0.99 else -1)
         return indicator
 
     def _is_in_target_box(self):
@@ -588,8 +626,8 @@ class PathingEnvironmentPybullet(gym.Env):
                 ray_results = np.array(pyb.rayTestBatch(ray_starts, ray_ends), dtype=object)[:,2]
                 j += 1
 
-            self.target_x_max = dist * ray_results[0] if z_axis_norm !=0 else dist * ray_results[0] * scale_factor
-            self.target_y_max = dist * ray_results[1] if z_axis_norm !=1 else dist * ray_results[1] * scale_factor
+            self.target_x_max = dist * ray_results[0] if z_axis_norm !=0 else dist * scale_factor #* ray_results[0]
+            self.target_y_max = dist * ray_results[1] if z_axis_norm !=1 else dist * scale_factor #* ray_results[1]
             self.target_p_z_max = dist * ray_results[2]
             self.target_m_z_max = -dist * ray_results[3]
         else:
@@ -604,6 +642,18 @@ class PathingEnvironmentPybullet(gym.Env):
     ###################
     # utility methods #
     ###################
+
+    def _is_out_of_bounds(self):
+        """
+        Returns boolean if the robot ee position is out of bounds
+        """
+        if self.pos[0] < 0 or self.pos[0] > self.x_max:
+            return True
+        if self.pos[1] < 0 or self.pos[1] > self.y_max:    
+            return True
+        if self.pos[2] < 0 or self.pos[2] > self.z_max:
+            return True
+        return False
 
     def _register_data(self):
         """
@@ -698,3 +748,37 @@ class PathingEnvironmentPybullet(gym.Env):
         res = util.quaternion_multiply(util.quaternion_invert(offset), tmp)
 
         return res
+
+    def _save_env_state(self, save_path="./model/saved_envs/"):
+        """
+        Writes the misc information about the env into a pckl file such that training progress can restored easily later on.
+        The file will have the name of the id given at initialization.
+        """
+        save_dict = {
+            'id': self.id,
+            'steps': self.steps_total,
+            'dist_threshold': self.ee_pos_reward_thresh,
+            'episodes': self.episodes,
+            'successes': self.successes,
+            'success_buffer': self.success_buffer,
+        }
+        with open(save_path + str(self.id)+ ".pckl", "wb") as outfile:
+            pickle.dump(save_dict, outfile, pickle.HIGHEST_PROTOCOL)
+
+    def _load_env_state(self, load_path="./model/saved_envs/"):
+        """
+        Loads misc information useful for continuing training from a npy in load path. Will automatically use the file named after the env's id.
+        """
+        try:
+            with open(load_path + str(self.id) + ".pckl", "rb") as infile:
+                load_dict = pickle.load(infile)        
+            self.id = load_dict["id"]
+            self.steps_total = load_dict["steps"]
+            self.ee_pos_reward_thresh = load_dict["dist_threshold"]
+            self.episodes = load_dict["episodes"]
+            self.successes = load_dict["successes"]
+            self.success_buffer = load_dict["success_buffer"]
+        except FileNotFoundError:
+            pass
+
+        
