@@ -106,9 +106,9 @@ class PathingEnvironmentPybullet(gym.Env):
         self.steps_total = 0
         # maximum steps per episode
         if self.train:
-            self.max_episode_steps = 1024
+            self.max_episode_steps = 512
         else:
-            self.max_episode_steps = 512  # reduce the overhead for model evaluation
+            self.max_episode_steps = 256  # reduce the overhead for model evaluation
         # episode counter
         self.episodes = 0
         self.episode_reward = 0
@@ -125,7 +125,7 @@ class PathingEnvironmentPybullet(gym.Env):
         # lidar: 10 ints that signify occupancy around the ee
         self.observation_space = gym.spaces.Dict(
             {
-              'spatial': gym.spaces.Box(low=-1, high=1, shape=(14,), dtype=np.float32),
+              'spatial': gym.spaces.Box(low=0, high=1, shape=(14,), dtype=np.float32),
               'lidar': gym.spaces.Box(low=-1, high=1, shape=(17,), dtype=np.int8)  
             }
         )
@@ -141,7 +141,7 @@ class PathingEnvironmentPybullet(gym.Env):
         self.normalizing_constant_a[:6] = 2 / self.joints_range
         self.normalizing_constant_a[6:9] = 2 / (vec_distance_max - vec_distance_min)
         self.normalizing_constant_a[9:13] = 0  # unit quaternions are already normalized
-        self.normalizing_constant_a[13] = 2 / max_distance 
+        self.normalizing_constant_a[13] = 1 / max_distance 
         self.normalizing_constant_b = np.zeros(14)
         self.normalizing_constant_b[:6] = np.ones(6) - np.multiply(self.normalizing_constant_a[:6], self.joints_upper_limits)
         self.normalizing_constant_b[6:9] = np.ones(3) - np.multiply(self.normalizing_constant_a[6:9], vec_distance_max)
@@ -213,7 +213,7 @@ class PathingEnvironmentPybullet(gym.Env):
         self.joints = self.resting_pose_angles
         self.lidar_probe = self._get_lidar_indicator()
 
-        if self.train and self.episodes % self.ee_pos_reward_threshold_change_after_episodes == 0:
+        if self.train:
             success_rate = np.average(self.success_buffer) if len(self.success_buffer) != 0 else 0
             if success_rate < 0.8 and self.ee_pos_reward_thresh < self.ee_pos_reward_thresh_max:
                 self.ee_pos_reward_thresh += self.ee_pos_reward_thresh_increments/4
@@ -223,7 +223,7 @@ class PathingEnvironmentPybullet(gym.Env):
                 self.ee_pos_reward_thresh = self.ee_pos_reward_thresh_min
             if self.ee_pos_reward_thresh > self.ee_pos_reward_thresh_max:
                 self.ee_pos_reward_thresh = self.ee_pos_reward_thresh_max
-            print("Current threshold for maximum reward: " + str(self.ee_pos_reward_thresh))
+            #print("Current threshold for maximum reward: " + str(self.ee_pos_reward_thresh))
 
         # turn on rendering again
         pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
@@ -270,6 +270,13 @@ class PathingEnvironmentPybullet(gym.Env):
             # add action to current state
             joints_desired = self.joints + joint_delta
 
+            # check if desired joints would violate any joint range constraints
+            upper_limit_mask = joints_desired > self.joints_upper_limits
+            lower_limit_mask = joints_desired < self.joints_lower_limits
+            # set those joints to their respective max/min
+            joints_desired[upper_limit_mask] = self.joints_upper_limits[upper_limit_mask]
+            joints_desired[lower_limit_mask] = self.joints_lower_limits[lower_limit_mask]
+
             # execute movement by setting the desired joint state
             self.joints = self._movej(joints_desired)
 
@@ -310,12 +317,12 @@ class PathingEnvironmentPybullet(gym.Env):
                 is_success = True
                 self.successes += 1
             else:
-                reward = -0.05 * distance_cur
+                reward = -1.0 * distance_cur
                 done = False
                 is_success = False
                 if distance_cur > distance_last:
                     # add a very small penalty if the distance increased in comparison to the last step
-                    reward -= 0.005 * distance_last
+                    reward -= 0.01 * distance_last
         else:
             reward = -15
             done = True
