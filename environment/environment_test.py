@@ -6,7 +6,7 @@ import os
 import pickle
 from time import sleep
 
-class PathingEnvironmentPybullet(gym.Env):
+class PathingEnvironmentPybullet2(gym.Env):
 
     def __init__(self,
                 asset_files_path,
@@ -134,9 +134,9 @@ class PathingEnvironmentPybullet(gym.Env):
         self.steps_total = 0
         # maximum steps per episode
         if self.train:
-            self.max_episode_steps = 1000 if self.use_joints else 1500
+            self.max_episode_steps = 1000 if self.use_joints else 5500
         else:
-            self.max_episode_steps = 250 if self.use_joints else 500  # reduce the overhead for model evaluation
+            self.max_episode_steps = 1250 if self.use_joints else 1500  # reduce the overhead for model evaluation
         # episode counter
         self.episodes = 0
         self.episode_reward = 0
@@ -216,7 +216,15 @@ class PathingEnvironmentPybullet(gym.Env):
         # info: the method will load the mesh at given index within the self.dataset variable
         file_index = np.random.choice(range(len(self.dataset["filenames"]))) 
         #file_index = self.dataset["filenames"].index("201910204483_R1.urdf")
-        self._add_object("objects/"+self.dataset["filenames"][file_index], self.xyz_offset)
+        #self._add_object("objects/"+self.dataset["filenames"][file_index], self.xyz_offset)
+        obst_1 = pyb.createMultiBody(
+            baseMass=0,
+            baseVisualShapeIndex=pyb.createVisualShape(shapeType=pyb.GEOM_BOX, halfExtents=[0.004,0.3,0.25], rgbaColor=[0.5,0.5,0.5,1]),
+            baseCollisionShapeIndex=pyb.createCollisionShape(shapeType=pyb.GEOM_BOX, halfExtents=[0.004,0.3,0.25]),
+            basePosition=[0.0,0.4,0.3],
+            baseOrientation=np.random.choice([0.707, 0, 0, 0.707])
+        )
+        self.obj_ids.append(obst_1)
         # set the target and base target
         while True:
             try:
@@ -225,7 +233,11 @@ class PathingEnvironmentPybullet(gym.Env):
             except ValueError:
                 file_index = np.random.choice(range(len(self.dataset["filenames"])))  # sometimes there are no targets in a given entry of the xml and the code will throw an error, this is to prevent that and choose another xml
         #target_index = 0
-        self._set_target(file_index, target_index)
+        #self._set_target(file_index, target_index)
+        init_home = [0.15,0.4,0.3]
+        init_orn = [0,0,0]
+        self.target = np.array([-0.15,0.4,0.3])
+        self.target_norms= [np.array([1,0,0]), np.array([0,1,0])]
         self._set_target_box(self.ee_pos_reward_thresh if self.larger_to_smaller else self.ee_pos_reward_thresh_min)
         if self.show_target:
             self._show_target()
@@ -234,17 +246,18 @@ class PathingEnvironmentPybullet(gym.Env):
 
         # load in the robot, the correct tool was set above while setting the target
         if self.tool:
-            self.robot = self._add_object("kr16/kr16_tand_gerad.urdf", np.append(self.target_base, self.ceiling_mount_height), pyb.getQuaternionFromEuler([np.pi, 0, 0]))
+            self.robot = self._add_object("kr16/kr16_tand_gerad.urdf", np.append(np.array(init_home[:2]), self.ceiling_mount_height), pyb.getQuaternionFromEuler([np.pi, 0, 0]))
         else:
-            self.robot = self._add_object("kr16/kr16_mrw510.urdf", np.append(self.target_base, self.ceiling_mount_height), pyb.getQuaternionFromEuler([np.pi, 0, 0]))      
+            self.robot = self._add_object("kr16/kr16_mrw510.urdf", np.append(np.array(init_home[:2]), self.ceiling_mount_height), pyb.getQuaternionFromEuler([np.pi, 0, 0]))      
 
         # get the joint ids of the robot and set the joints to their resting position
         joints = [pyb.getJointInfo(self.robot, i) for i in range(pyb.getNumJoints(self.robot))]
         self.joint_ids = [j[0] for j in joints if j[2] == pyb.JOINT_REVOLUTE]
         self._set_joint_state(self.resting_pose_angles)
         self.joints = self.resting_pose_angles
+        self.joints = self._movep(init_home, self._quat_w_to_ee(util.rpy_to_quaternion(init_orn)))
         # in training set the arm to a random position sometimes
-        if self.train:
+        """ if self.train:
             if self.larger_to_smaller:
                 if np.random.random() < 0.6:
                     start = True
@@ -267,7 +280,7 @@ class PathingEnvironmentPybullet(gym.Env):
                     random_rpy = np.random.uniform(low=self.rpy_lower_limits, high=self.rpy_upper_limits, size=3)
                     self.joints = self._movep(self.target +  random_xyz_offset, self._quat_w_to_ee(util.rpy_to_quaternion(random_rpy)))
                     start = np.linalg.norm(np.array(pyb.getLinkState(self.robot, self.end_effector_link_id, computeForwardKinematics=True)[4]) - (random_xyz_offset + self.target)) > stretch
-
+        """
         # get state information
         ee_link_state = pyb.getLinkState(self.robot, self.end_effector_link_id, computeForwardKinematics=True)
         self.pos = np.array(ee_link_state[4])
@@ -493,11 +506,7 @@ class PathingEnvironmentPybullet(gym.Env):
         # only score on position
         if not self.use_set_poses:
             # check if out of bounds
-            if self._is_out_of_bounds(distance_cur):
-                done = True
-                is_success = False
-                reward = -0.75
-            elif not collided:
+            if not collided:
                 #if distance_cur < self.ee_pos_reward_thresh:
                 if self._is_in_target_box():
                     reward = 1
@@ -882,7 +891,7 @@ class PathingEnvironmentPybullet(gym.Env):
         self.target_transform = util.matrix_to_quaternion(transform)
 
         # now use the norms to cast rays to determine the maximum possible extent of the target box if so desired
-        scale_factor = 1.5
+        scale_factor = 1
         if not self.ignore_obstacles_for_target_box:
             ray_starts = [(self.target).tolist() for i in range(4)]
             ray_ends = [(self.target + norms[i] * dist).tolist() for i in range(4)]

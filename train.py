@@ -36,7 +36,7 @@ for i_episode in range(num_episodes):
 
         action = agent.act(torch.from_numpy(state_old).to(agent.model.device))
 
-        state_new , reward, done, _ = env.step(action)
+        state_new , reward, done, _ = env.step(action*0.2)
         reward_buffer.append(reward)
         """
         print("state old")

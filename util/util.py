@@ -162,7 +162,7 @@ def quaternion_similarity(quat1, quat2):
     return 1 - np.arccos(np.clip(2 * np.dot(quat1, quat2)**2 - 1, -1, 1))/np.pi
 
 def quaternion_apx_eq(quat1, quat2, thresh=5e-2):
-    return  quaternion_similarity(quat1, quat2) < thresh
+    return  (1 - quaternion_similarity(quat1, quat2)) < thresh
 
 def exp_decay(x, max, zero_crossing):
     if x >= zero_crossing:
@@ -175,11 +175,11 @@ def exp_decay_alt(x, max, half):
     return max*np.exp((np.log(1/2)/half)*x)
 
 def rotate_vec(quat, vec):
+    # this is apparently way more efficient than the naive multiplication below
+    # see https://gamedev.stackexchange.com/a/50545
     im_part = np.array(quat[:3])
     re_part = quat[3]
 
-    # this is apparently way more efficient than the naive multiplication below
-    # see https://gamedev.stackexchange.com/a/50545
     res = 2.0 * np.dot(im_part, vec) * im_part + (re_part * re_part - np.dot(im_part, im_part)) * vec + 2.0 * re_part * np.cross(im_part, vec)  
     return res
 
@@ -189,3 +189,8 @@ def rotate_vec(quat, vec):
 def cosine_similarity(vec1, vec2):
     norm = np.linalg.norm(vec1) * np.linalg.norm(vec2)
     return np.dot(vec1, vec2) / norm
+
+def linear_interpolation(x, x1, x2, y1, y2):
+    m = (y2 - y1) / (x2 - x1)
+    n = y1 - m * x1
+    return m * x + n
