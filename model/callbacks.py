@@ -10,13 +10,19 @@ class MoreLoggingCustomCallback(BaseCallback):
         Extracts some values from the envs and logs them. Only works for VecEnvs.
         """
         dist = np.average(self.training_env.get_attr("episode_distance"))
-        success_rate = np.average([np.average(ar) for ar in self.training_env.get_attr("success_buffer")])
+        success_rate = np.average([(np.average(ar) if len(ar) != 0 else 0) for ar in self.training_env.get_attr("success_buffer")])
         reward = np.average(self.training_env.get_attr("episode_reward"))
         dist_threshold = np.average(self.training_env.get_attr("ee_pos_reward_thresh"))
+        collision_rate = np.average([(np.average(ar) if len(ar) != 0 else 0) for ar in self.training_env.get_attr("collision_buffer")])
+        timeout_rate = np.average([(np.average(ar) if len(ar) != 0 else 0) for ar in self.training_env.get_attr("timeout_buffer")])
+        out_of_bounds_rate = np.average([(np.average(ar) if len(ar) != 0 else 0) for ar in self.training_env.get_attr("out_of_bounds_buffer")])
         self.logger.record("train/episode_distance", dist)
         self.logger.record("train/success_rate_train", success_rate)
         self.logger.record("train/episode_reward", reward)
         self.logger.record("train/dist_threshold", dist_threshold)
+        self.logger.record("train/collision_rate", collision_rate)
+        self.logger.record("train/out_of_bounds_rate", out_of_bounds_rate)
+        self.logger.record("train/timeout_rate", timeout_rate)
         return True
 
     def _on_step(self) -> bool:

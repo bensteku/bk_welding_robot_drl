@@ -13,3 +13,4 @@ model/weights
 model/tf_board_logs
 model/saved_envs
 *.zip
+test

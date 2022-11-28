@@ -9,52 +9,43 @@ from time import sleep
 class PathingEnvironmentPybullet(gym.Env):
 
     def __init__(self,
-                asset_files_path,
-                train=False,
-                use_joints=False,
-                display=False,
-                show_target=False,
-                ignore_obstacles_for_target_box=False,
-                use_set_poses=False,
-                normalize=True,
-                use_raw_lidar=False,
-                larger_to_smaller=True,
-                id=0):
+                env_config):
 
-        # id, default is 0, but can be another number, used for running several envs in parallel
-        self.id = id
+        # id, default is 0, but can be another number, used for distinguishing envs running in parallel
+        self.id = env_config["id"]
 
         # eval or train mode
-        self.train = train
+        self.train = env_config["train"]
 
         # path for asset files
-        self.asset_files_path = asset_files_path
+        self.asset_files_path = env_config["asset_files_path"]
 
         # bool flag for showing the target in the pybullet simulation
-        self.show_target = show_target
+        self.show_target = env_config["show_target"]
 
         # bool falg for whether actions are xyz and rpy movements or joint movements
-        self.use_joints = use_joints
+        self.use_joints = env_config["use_joints"]
 
         # bool flag whether to also reward current rotation
-        self.use_set_poses = use_set_poses
+        self.use_set_poses = env_config["use_set_poses"]
 
         # bool flag wether to process lidar results or not
-        self.use_raw_lidar = use_raw_lidar
+        self.use_raw_lidar = env_config["use_raw_lidar"]
 
         # bool flag whether observations are normalized or not
-        self.normalize = normalize
+        self.normalize = env_config["normalize"]
 
-        self.larger_to_smaller = larger_to_smaller
+        # attribute for target box, see its method
+        self.ignore_obstacles_for_target_box = env_config["ignore_obstacles_for_target_box"]
+
+        # attribute for pybullet display
+        self.display = env_config["display"]
         
         # list of pybullet object ids currently in the env
         self.obj_ids = []
 
         # tool mounted to the robot, 0: MRW510, 1: TAND GERAD
         self.tool = 0
-
-        # attribute for target box, see its method
-        self.ignore_obstacles_for_target_box = ignore_obstacles_for_target_box
 
         # pybullet robot constants
         self.resting_pose_angles = np.array([0, -0.5, 0.75, -1, 0.5, 0.5]) * np.pi  # resting pose angles for the kr16
@@ -66,6 +57,10 @@ class PathingEnvironmentPybullet(gym.Env):
         self.ceiling_mount_height = 2  # height at which the robot is mounted on the ceiling
         self.rpy_upper_limits = np.array([1.3, 2, np.pi])
         self.rpy_lower_limits = np.array([-2.3, -2, -np.pi])
+        # pybullet object ids
+        self.robot = None
+        self.welding_mesh = None
+        self.mesh_file_index = None
 
         # angle conversion constants
         # these are used for converting the pybullet coordinate system of the end effector into the coordinate system used
@@ -104,8 +99,11 @@ class PathingEnvironmentPybullet(gym.Env):
             self.ee_pos_reward_thresh_max = 6e-1
             self.ee_pos_reward_thresh_max_increment = 1e-2
             self.ee_pos_reward_thresh_min_increment = 1e-3
-            self.ee_pos_reward_threshold_change_after_episodes = 50
+            self.stats_buffer_size = 50
             self.success_buffer = []
+            self.collision_buffer = []
+            self.timeout_buffer = []
+            self.out_of_bounds_buffer = []
         else:
             self.ee_pos_reward_thresh = 1e-2
             self.ee_pos_reward_thresh_min = 1e-2
@@ -125,6 +123,7 @@ class PathingEnvironmentPybullet(gym.Env):
         self.joints = None
         self.max_dist = None
         self.min_dist = None
+        self.distance = None
 
         # process the dataset of meshes and urdfs
         self.dataset = self._register_data()
@@ -143,8 +142,14 @@ class PathingEnvironmentPybullet(gym.Env):
         self.episode_distance = 0
         # success counter, to calculate success rate
         self.successes = 0
+        # collision counter, to calculate collision rate
+        self.collisions = 0
         # bool flag if current episode is a success, gets used in the next episode for adjusting the target zone difficulty
         self.is_success = False
+        # counter for reseting the mesh in the reset method
+        # this means that for x episodes, the mesh in the env will stay the same and only the targets will change
+        # this saves performance with no drawback
+        self.reset_mesh_after_episodes = 100
 
         # gym action space
         # first three entries: ee position, last three entries: ee rotation given as rpy in pybullet world frame
@@ -179,10 +184,11 @@ class PathingEnvironmentPybullet(gym.Env):
         self.normalizing_constant_b[9:12] = np.ones(3) - np.multiply(self.normalizing_constant_a[9:12], self.rpy_upper_limits)
         self.normalizing_constant_b[12] = 1 - self.normalizing_constant_a[12] * max_distance
 
+        self.reload = False
+
         # pybullet connection and setup
         disp = pyb.DIRECT  # direct <-> no gui, use for training
-        self.display = display
-        if display:
+        if self.display:
             disp = pyb.GUI
         pyb.connect(disp)
         pyb.setAdditionalSearchPath(self.asset_files_path)
@@ -195,78 +201,77 @@ class PathingEnvironmentPybullet(gym.Env):
 
     def reset(self):
 
+        complete_reset = self.episodes == 0 or self.episodes % self.reset_mesh_after_episodes == 0 or self.reload
+        self.reload = False
+
+        # clear out stored objects and reset the simulation if necessary
+        if complete_reset:
+            self.obj_ids = []
+            pyb.resetSimulation()
+
         # set the step and episode counters correctly
         self.steps_current_episode = 0
         self.episodes += 1
         self.episode_reward = 0
         self.episode_distance = 0
 
-        # clear out stored objects and reset the simulation
-        self.obj_ids = []
-        pyb.resetSimulation()
-
         # stop pybullet rendering for performance
         pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)
 
-        # rebuild environment
-        # load in the ground plane
-        self._add_object("workspace/plane.urdf", [0, 0, -0.01])
+        if complete_reset:
+            # rebuild environment
+            # load in the ground plane
+            self._add_object("workspace/plane.urdf", [0, 0, -0.01])
 
-        # load in the mesh of the welding part
-        # info: the method will load the mesh at given index within the self.dataset variable
-        file_index = np.random.choice(range(len(self.dataset["filenames"]))) 
-        #file_index = self.dataset["filenames"].index("201910204483_R1.urdf")
-        self._add_object("objects/"+self.dataset["filenames"][file_index], self.xyz_offset)
-        # set the target and base target
+            # load in the mesh of the welding part
+            # info: the method will load the mesh at given index within the self.dataset variable
+            #self.mesh_file_index = np.random.choice(range(len(self.dataset["filenames"]))) 
+            self.mesh_file_index = self.dataset["filenames"].index("201910204483_R1.urdf")
+            self.welding_mesh = self._add_object("objects/"+self.dataset["filenames"][self.mesh_file_index], self.xyz_offset)
+        # set the target and base target (this is done in the method calls below)
         while True:
             try:
-                target_index = np.random.choice(range(len(self.dataset["frames"][file_index])))  # pick a random target from the welding part's xml
+                target_index = np.random.choice(range(len(self.dataset["frames"][self.mesh_file_index])))  # pick a random target from the welding part's xml
                 break
             except ValueError:
-                file_index = np.random.choice(range(len(self.dataset["filenames"])))  # sometimes there are no targets in a given entry of the xml and the code will throw an error, this is to prevent that and choose another xml
-        #target_index = 0
-        self._set_target(file_index, target_index)
-        self._set_target_box(self.ee_pos_reward_thresh if self.larger_to_smaller else self.ee_pos_reward_thresh_min)
+                self.mesh_file_index = np.random.choice(range(len(self.dataset["filenames"])))  # sometimes there are no targets in a given entry of the xml and the code will throw an error, this is to prevent that and choose another xml
+        target_index = 0
+        tool_old = self.tool  # remember the old tool for checking in a moment
+        self._set_target(self.mesh_file_index, target_index)
+        self._set_target_box(self.ee_pos_reward_thresh)
         if self.show_target:
             self._show_target()
-        #tmp
+        #tmp, set to one tool for now, full implementation for both tools later on
         self.tool=0
 
-        # load in the robot, the correct tool was set above while setting the target
-        if self.tool:
-            self.robot = self._add_object("kr16/kr16_tand_gerad.urdf", np.append(self.target_base, self.ceiling_mount_height), pyb.getQuaternionFromEuler([np.pi, 0, 0]))
+        # load in the robot, the correct tool was set above in the _set_target method call
+        if self.tool == tool_old and not complete_reset:
+            # if the tool has stayed the same, we can avoid an expensive load in of the robot mesh from the drive and simply change its current position
+            pyb.resetBasePositionAndOrientation(self.robot, np.append(self.target_base, self.ceiling_mount_height), pyb.getQuaternionFromEuler([np.pi, 0, 0]))
         else:
-            self.robot = self._add_object("kr16/kr16_mrw510.urdf", np.append(self.target_base, self.ceiling_mount_height), pyb.getQuaternionFromEuler([np.pi, 0, 0]))      
+            # if the tool has changed (or we're running the env for the first time or completely reseting), loading in the robot mesh is necessary
+            if self.tool:
+                self.robot = self._add_object("kr16/kr16_tand_gerad.urdf", np.append(self.target_base, self.ceiling_mount_height), pyb.getQuaternionFromEuler([np.pi, 0, 0]))
+            else:
+                self.robot = self._add_object("kr16/kr16_mrw510.urdf", np.append(self.target_base, self.ceiling_mount_height), pyb.getQuaternionFromEuler([np.pi, 0, 0]))      
 
         # get the joint ids of the robot and set the joints to their resting position
         joints = [pyb.getJointInfo(self.robot, i) for i in range(pyb.getNumJoints(self.robot))]
         self.joint_ids = [j[0] for j in joints if j[2] == pyb.JOINT_REVOLUTE]
         self._set_joint_state(self.resting_pose_angles)
         self.joints = self.resting_pose_angles
-        # in training set the arm to a random position sometimes
+        # in training set the arm to a random position sometimes to force a variety of starting positions
         if self.train:
-            if self.larger_to_smaller:
-                if np.random.random() < 0.6:
-                    start = True
-                    while start or self._collision():
-                        start = False
-                        random_xyz_offset = np.random.random(3) * 2 - 1
-                        random_xyz_offset[2] = abs(random_xyz_offset[2])
-                        random_xyz_offset = random_xyz_offset * (max(self.ee_pos_reward_thresh * 1.5, np.random.random()) / np.linalg.norm(random_xyz_offset))
-                        random_rpy = np.random.uniform(low=self.rpy_lower_limits, high=self.rpy_upper_limits, size=3)
-                        self.joints = self._movep(self.target +  random_xyz_offset, self._quat_w_to_ee(util.rpy_to_quaternion(random_rpy)))
-                        start = np.linalg.norm(np.array(pyb.getLinkState(self.robot, self.end_effector_link_id, computeForwardKinematics=True)[4]) - (random_xyz_offset + self.target)) > self.ee_pos_reward_thresh * 1.5
-            else:
+            if np.random.random() < -1:
                 start = True
                 while start or self._collision():
                     start = False
                     random_xyz_offset = np.random.random(3) * 2 - 1
                     random_xyz_offset[2] = abs(random_xyz_offset[2])
-                    stretch = max(2 * self.ee_pos_reward_thresh_min, np.random.random() * self.ee_spawn_thresh)
-                    random_xyz_offset = random_xyz_offset * (stretch / np.linalg.norm(random_xyz_offset))
+                    random_xyz_offset = random_xyz_offset * (max(self.ee_pos_reward_thresh * 1.5, np.random.random()) / np.linalg.norm(random_xyz_offset))
                     random_rpy = np.random.uniform(low=self.rpy_lower_limits, high=self.rpy_upper_limits, size=3)
                     self.joints = self._movep(self.target +  random_xyz_offset, self._quat_w_to_ee(util.rpy_to_quaternion(random_rpy)))
-                    start = np.linalg.norm(np.array(pyb.getLinkState(self.robot, self.end_effector_link_id, computeForwardKinematics=True)[4]) - (random_xyz_offset + self.target)) > stretch
+                    start = np.linalg.norm(np.array(pyb.getLinkState(self.robot, self.end_effector_link_id, computeForwardKinematics=True)[4]) - (random_xyz_offset + self.target)) > self.ee_pos_reward_thresh * 1.5
 
         # get state information
         ee_link_state = pyb.getLinkState(self.robot, self.end_effector_link_id, computeForwardKinematics=True)
@@ -275,27 +280,23 @@ class PathingEnvironmentPybullet(gym.Env):
         self.rot = np.array(ee_link_state[5])
         self.rot_internal = self._quat_ee_to_w(np.array(ee_link_state[1]))
         self.lidar_indicator, self.lidar_indicator_raw = self._get_lidar_indicator()
+        self.max_dist = np.linalg.norm(self.pos - self.target)
+        self.min_dist = self.max_dist
+        self.distance = self.max_dist
 
         if self.train:
-            success_rate = np.average(self.success_buffer) if len(self.success_buffer) != 0 else 0
+            if len(self.success_buffer) != 0:
+                success_rate = np.average(self.success_buffer) 
+            else:
+                success_rate = 0
             if success_rate < 0.8 and self.ee_pos_reward_thresh < self.ee_pos_reward_thresh_max and not self.is_success:
-                if self.larger_to_smaller:
-                    self.ee_pos_reward_thresh += util.linear_interpolation(self.ee_pos_reward_thresh, self.ee_pos_reward_thresh_min, self.ee_pos_reward_thresh_max, self.ee_pos_reward_thresh_min_increment, self.ee_pos_reward_thresh_max_increment) / 6
-                else:
-                    self.ee_spawn_thresh -= util.linear_interpolation(self.ee_spawn_thresh, self.ee_pos_reward_thresh_min, self.ee_pos_reward_thresh_max, self.ee_pos_reward_thresh_min_increment, self.ee_pos_reward_thresh_max_increment) / 6
+                self.ee_pos_reward_thresh += util.linear_interpolation(self.ee_pos_reward_thresh, self.ee_pos_reward_thresh_min, self.ee_pos_reward_thresh_max, self.ee_pos_reward_thresh_min_increment, self.ee_pos_reward_thresh_max_increment) / 15
             elif success_rate > 0.8 and self.ee_pos_reward_thresh > self.ee_pos_reward_thresh_min and self.is_success:
-                if self.larger_to_smaller:
-                    self.ee_pos_reward_thresh -= util.linear_interpolation(self.ee_pos_reward_thresh, self.ee_pos_reward_thresh_min, self.ee_pos_reward_thresh_max, self.ee_pos_reward_thresh_min_increment, self.ee_pos_reward_thresh_max_increment) 
-                else:
-                    self.ee_spawn_thresh += util.linear_interpolation(self.ee_spawn_thresh, self.ee_pos_reward_thresh_min, self.ee_pos_reward_thresh_max, self.ee_pos_reward_thresh_min_increment, self.ee_pos_reward_thresh_max_increment) 
+                self.ee_pos_reward_thresh -= util.linear_interpolation(self.ee_pos_reward_thresh, self.ee_pos_reward_thresh_min, self.ee_pos_reward_thresh_max, self.ee_pos_reward_thresh_min_increment, self.ee_pos_reward_thresh_max_increment) 
             if self.ee_pos_reward_thresh < self.ee_pos_reward_thresh_min:
                 self.ee_pos_reward_thresh = self.ee_pos_reward_thresh_min
             if self.ee_pos_reward_thresh > self.ee_pos_reward_thresh_max:
                 self.ee_pos_reward_thresh = self.ee_pos_reward_thresh_max
-            if self.ee_spawn_thresh < self.ee_spawn_thresh_min:
-                self.ee_spawn_thresh = self.ee_spawn_thresh_min
-            if self.ee_spawn_thresh > self.ee_spawn_thresh_max:
-                self.ee_spawn_thresh = self.ee_spawn_thresh_max
         
         self.is_success = False
 
@@ -310,12 +311,12 @@ class PathingEnvironmentPybullet(gym.Env):
             spatial[:6] = np.multiply(self.normalizing_constant_a[:6], self.joints) + self.normalizing_constant_b[:6]
             spatial[6:9] = np.multiply(self.normalizing_constant_a[6:9], (self.target - self.pos)) + self.normalizing_constant_b[6:9]
             spatial[9:12] = np.multiply(self.normalizing_constant_a[9:12], util.quaternion_to_rpy(self.rot_internal)) +  self.normalizing_constant_b[9:12]
-            spatial[12] = self.normalizing_constant_a[12] * np.linalg.norm(self.target - self.pos) + self.normalizing_constant_b[12]
+            spatial[12] = self.normalizing_constant_a[12] * self.distance + self.normalizing_constant_b[12]
         else:
             spatial[:6] = self.joints
             spatial[6:9] = self.target - self.pos
             spatial[9:12] = util.quaternion_to_rpy(self.rot_internal)
-            spatial[12] = np.linalg.norm(self.target-self.pos)
+            spatial[12] = self.distance
 
         return {
             'spatial': spatial if self.use_joints else spatial[6:],
@@ -324,11 +325,11 @@ class PathingEnvironmentPybullet(gym.Env):
 
     def step(self, action):
 
-        # get state info
-        ee_link_state = pyb.getLinkState(self.robot, self.end_effector_link_id, computeForwardKinematics=True)
-        self.pos = np.array(ee_link_state[4])
+        # save old position
+        #ee_link_state = pyb.getLinkState(self.robot, self.end_effector_link_id, computeForwardKinematics=True)
+        #self.pos = np.array(ee_link_state[4])
         self.pos_last = self.pos
-        self.rot = np.array(ee_link_state[5])
+        #self.rot = np.array(ee_link_state[5])
 
         if not self.use_joints:
             # transform action
@@ -374,8 +375,6 @@ class PathingEnvironmentPybullet(gym.Env):
         self.rot = np.array(ee_link_state[5])
         self.rot_internal = self._quat_ee_to_w(np.array(ee_link_state[1]))
         self.lidar_indicator, self.lidar_indicator_raw = self._get_lidar_indicator()
-        self.max_dist = np.linalg.norm(self.pos - self.target)
-        self.min_dist = self.max_dist
 
         # increment steps
         self.steps_current_episode += 1
@@ -397,6 +396,8 @@ class PathingEnvironmentPybullet(gym.Env):
 
         distance_cur = np.linalg.norm(self.target - self.pos)
         distance_last = np.linalg.norm(self.target - self.pos_last) 
+
+        self.distance = distance_cur
 
         # update the max_dist variable
         if distance_cur > self.max_dist:
@@ -445,7 +446,7 @@ class PathingEnvironmentPybullet(gym.Env):
         if self.train:
             if done:
                 self.success_buffer.append(is_success)
-                if len(self.success_buffer) > self.ee_pos_reward_threshold_change_after_episodes:
+                if len(self.success_buffer) > self.stats_buffer_size:
                     self.success_buffer.pop(0)
         
         self.episode_reward += reward
@@ -482,6 +483,7 @@ class PathingEnvironmentPybullet(gym.Env):
         # steps vor collision angucken
 
         collided = self._collision()
+        out_of_bounds = False
 
         distance_cur = np.linalg.norm(self.target - self.pos)
         distance_last = np.linalg.norm(self.target - self.pos_last)
@@ -496,11 +498,14 @@ class PathingEnvironmentPybullet(gym.Env):
             if self._is_out_of_bounds(distance_cur):
                 done = True
                 is_success = False
+                out_of_bounds = True
                 reward = -0.75
+                reward = -5
             elif not collided:
                 #if distance_cur < self.ee_pos_reward_thresh:
                 if self._is_in_target_box():
                     reward = 1
+                    reward = 10
                     done = True
                     is_success = True
                     self.successes += 1
@@ -543,7 +548,8 @@ class PathingEnvironmentPybullet(gym.Env):
                     #proximity = 0 if distance_cur > fade_out*self.ee_pos_reward_thresh else (np.sqrt(distance_cur)/(np.sqrt(fade_out*self.ee_pos_reward_thresh)))
                     #proximity = 1 if False else (distance_cur**15/(np.sqrt(fade_out*self.ee_pos_reward_thresh)))
                     reward = reward_1 + reward_2 #* (1 - (1/(1+distance_cur)))
-                    reward = reward * 1e-4
+                    reward = reward * 1e-5
+                    reward = -0.01 * distance_cur
                     """ 
                     print("------------")
                     print(minimum_contact, distance_cur)
@@ -553,8 +559,10 @@ class PathingEnvironmentPybullet(gym.Env):
                     """
             else:
                 reward = -1
+                reward = -10
                 done = True
                 is_success = False
+                self.collisions += 1
         # score also on rotation
         else:
             if self._is_out_of_bounds():
@@ -584,14 +592,25 @@ class PathingEnvironmentPybullet(gym.Env):
                 done = True
                 is_success = False
 
+        timeout = False
         if self.steps_current_episode > self.max_episode_steps:
             done = True
+            timeout = True
 
         if self.train:
             if done:
                 self.success_buffer.append(is_success)
-                if len(self.success_buffer) > self.ee_pos_reward_threshold_change_after_episodes:
+                if len(self.success_buffer) > self.stats_buffer_size:
                     self.success_buffer.pop(0)
+                self.collision_buffer.append(collided)
+                if len(self.collision_buffer) > self.stats_buffer_size:
+                    self.collision_buffer.pop(0)
+                self.timeout_buffer.append(timeout)
+                if len(self.timeout_buffer) > self.stats_buffer_size:
+                    self.timeout_buffer.pop(0)
+                self.out_of_bounds_buffer.append(out_of_bounds)
+                if len(self.out_of_bounds_buffer) > self.stats_buffer_size:
+                    self.out_of_bounds_buffer.pop(0)
         
         self.episode_reward += reward
         self.episode_distance += distance_cur
@@ -605,6 +624,11 @@ class PathingEnvironmentPybullet(gym.Env):
             'is_success': is_success,
             'success_rate': self.successes/self.episodes if not self.train else np.average(self.success_buffer),
             'collided': collided,
+            'collision_rate': self.collisions/self.episodes if not self.train else np.average(self.collision_buffer),
+            'timeout': timeout,
+            'timeout_rate': 0 if not self.train else np.average(self.timeout_buffer),
+            'out_of_bounds': out_of_bounds,
+            'out_of_bounds_rate': 0 if not self.train else np.average(self.out_of_bounds_buffer),
             'reward': reward,
             'episode_reward': self.episode_reward,
             'distance': distance_cur,
@@ -725,7 +749,7 @@ class PathingEnvironmentPybullet(gym.Env):
         #joints[2:] = (joints[2:] + np.pi) % (2 * np.pi) - np.pi
         return joints
 
-    def _cast_lidar_rays(self, ray_min=0.02, ray_max=0.1, ray_num_side=6, ray_num_forward=12, render=False):
+    def _cast_lidar_rays(self, ray_min=0.02, ray_max=0.3, ray_num_side=6, ray_num_forward=12, render=True):
         """
         Casts rays from various positions on the torch and receives collision information from that. Currently only adjusted for the MRW tool.
         """
@@ -803,27 +827,39 @@ class PathingEnvironmentPybullet(gym.Env):
                     pyb.addUserDebugLine(ray_froms[index], ray_tops[index], hitRayColor)
         return results
 
-    def _get_lidar_indicator(self):
+    def _get_lidar_indicator(self, buckets=20):
         ray_num_side=6
         ray_num_forward=12
         lidar_results = np.array(self._cast_lidar_rays(ray_num_side=ray_num_side, ray_num_forward=ray_num_forward), dtype=object)[:,2]  # only use the distance information
         indicator_raw = np.zeros((17,), dtype=np.float32)
         indicator = np.zeros((17,), dtype=np.float32)
+
+        # values that are used to convert the raw pybullet range data to a discrete indicator
+        raw_bucket_size = 1/buckets  # 1 is the range of the pybullet lidar data (from 0 to 1)
+        indicator_label_diff = 2/buckets  # 2 is the range of the indicator data (from -1 to 1)
+        # small function to convert between the data
+        raw_to_indicator = lambda x : 1 if x >= 0.99 else round((np.max([(np.ceil(x/raw_bucket_size)-1),0]) * indicator_label_diff - 1),5)
+        # short explanation: takes a number between 0 and 1, assigns it a bucket in the range, and returns the corresponding bucket in the range of -1 and 1
+        # the round is thrown in there to prevent weird numeric appendages that came up in testing, e.g. 0.200000000004, -0.199999999999 or the like
+
         # side note: the array slices here are very complicated, but they basically just count up the rays in the order they are in the lidar_results object
         # as pybullet will output them in the lider_cylinder method. Instead of hardcoding the slices they are kept as variables such that the amount of rays can be changed at will
         # tip front indicator
         lidar_min = lidar_results[0:(2 * ray_num_forward + 1)].min()  # 1 ray going straight forward + 2 cones of ray_num_forward rays around it
-        indicator[0] = 1 if lidar_min >= 0.99 else (0.5 if 0.75 <= lidar_min < 0.99 else (0 if 0.5 <= lidar_min < 0.75 else (-0.5 if 0.25 <= lidar_min < 0.5 else -1)))
+        #indicator[0] = 1 if lidar_min >= 0.99 else (0.5 if 0.75 <= lidar_min < 0.99 else (0 if 0.5 <= lidar_min < 0.75 else (-0.5 if 0.25 <= lidar_min < 0.5 else -1)))
+        indicator[0] = raw_to_indicator(lidar_min)
         indicator_raw[0] = lidar_min
         # tip sides indicators
         for i in range(8):
             lidar_min = lidar_results[(2 * ray_num_forward + 1 + i * ray_num_side):(2 * ray_num_forward + 1 + (i + 1) * ray_num_side)].min()
-            indicator[1+i] = 1 if lidar_min >= 0.99 else (0.5 if 0.75 <= lidar_min < 0.99 else (0 if 0.5 <= lidar_min < 0.75 else (-0.5 if 0.25 <= lidar_min < 0.5 else -1)))
+            #indicator[1+i] = 1 if lidar_min >= 0.99 else (0.5 if 0.75 <= lidar_min < 0.99 else (0 if 0.5 <= lidar_min < 0.75 else (-0.5 if 0.25 <= lidar_min < 0.5 else -1)))
+            indicator[1+i] = raw_to_indicator(lidar_min)
             indicator_raw[1+i] = lidar_min
         # grip sides indicators
         for i in range(8):
             lidar_min = lidar_results[(2 * ray_num_forward + 1 + 8 * ray_num_side + i * ray_num_side):(2 * ray_num_forward + 1 + 8 * ray_num_side + (i + 1) * ray_num_side)].min()
-            indicator[1+8+i] = 1 if lidar_min >= 0.99 else (0.5 if 0.75 <= lidar_min < 0.99 else (0 if 0.5 <= lidar_min < 0.75 else (-0.5 if 0.25 <= lidar_min < 0.5 else -1)))
+            #indicator[1+8+i] = 1 if lidar_min >= 0.99 else (0.5 if 0.75 <= lidar_min < 0.99 else (0 if 0.5 <= lidar_min < 0.75 else (-0.5 if 0.25 <= lidar_min < 0.5 else -1)))
+            indicator[1+8+i] = raw_to_indicator(lidar_min)
             indicator_raw[1+8+i] = lidar_min
         return indicator, indicator_raw
 
@@ -1097,7 +1133,11 @@ class PathingEnvironmentPybullet(gym.Env):
             'dist_threshold': self.ee_pos_reward_thresh,
             'episodes': self.episodes,
             'successes': self.successes,
+            'collisions': self.collisions,
             'success_buffer': self.success_buffer,
+            'collision_buffer': self.collision_buffer,
+            'timeout_buffer': self.timeout_buffer,
+            'out_of_bounds_buffer': self.out_of_bounds_buffer
         }
         with open(save_path + str(self.id)+ ".pckl", "wb") as outfile:
             pickle.dump(save_dict, outfile, pickle.HIGHEST_PROTOCOL)
@@ -1109,13 +1149,184 @@ class PathingEnvironmentPybullet(gym.Env):
         try:
             with open(load_path + str(self.id) + ".pckl", "rb") as infile:
                 load_dict = pickle.load(infile)        
+            self.reload = True
             self.id = load_dict["id"]
             self.steps_total = load_dict["steps"]
             self.ee_pos_reward_thresh = load_dict["dist_threshold"]
             self.episodes = load_dict["episodes"]
             self.successes = load_dict["successes"]
             self.success_buffer = load_dict["success_buffer"]
+            self.collision_buffer = load_dict["collision_buffer"]
+            self.timeout_buffer = load_dict["timeout_buffer"]
+            self.out_of_bounds_buffer = load_dict["out_of_bounds_buffer"]
         except FileNotFoundError:
             pass
 
+class PathingEnvironmentPybulletWithCamera(PathingEnvironmentPybullet):
+
+    def __init__(self, env_config):
+        super().__init__(env_config)
+
+        camera_height = 32
+        camera_width = 32
+        self.projection_matrix = pyb.computeProjectionMatrixFOV(60, 1, 0.001, 100)
+        self.view_matrix = None
+        self.take_image_every_x_steps = 10
+        self.observation_space = gym.spaces.Dict(
+            {
+            'spatial': gym.spaces.Box(low=-1 if self.normalize else -8, high=1 if self.normalize else 8, shape=(13 if self.use_joints else 7,), dtype=np.float32),
+            'lidar': gym.spaces.Box(low=0 if self.use_raw_lidar else -1, high=1, shape=(17,), dtype=np.float32),
+            'camera': gym.spaces.Box(low=0, high=5, shape=(camera_height, camera_width))  
+            }
+        )
+
+    def reset(self):
         
+        complete_reset = self.episodes == 0 or self.episodes % self.reset_mesh_after_episodes == 0 or self.reload
+        self.reload = False
+
+        # clear out stored objects and reset the simulation if necessary
+        if complete_reset:
+            self.obj_ids = []
+            pyb.resetSimulation()
+
+        # set the step and episode counters correctly
+        self.steps_current_episode = 0
+        self.episodes += 1
+        self.episode_reward = 0
+        self.episode_distance = 0
+
+        # stop pybullet rendering for performance
+        pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 0)
+
+        if complete_reset:
+            # rebuild environment
+            # load in the ground plane
+            self._add_object("workspace/plane.urdf", [0, 0, -0.01])
+
+            # load in the mesh of the welding part
+            # info: the method will load the mesh at given index within the self.dataset variable
+            #self.mesh_file_index = np.random.choice(range(len(self.dataset["filenames"]))) 
+            self.mesh_file_index = self.dataset["filenames"].index("201910204483_R1.urdf")
+            self.welding_mesh = self._add_object("objects/"+self.dataset["filenames"][self.mesh_file_index], self.xyz_offset)
+        # set the target and base target (this is done in the method calls below)
+        while True:
+            try:
+                target_index = np.random.choice(range(len(self.dataset["frames"][self.mesh_file_index])))  # pick a random target from the welding part's xml
+                break
+            except ValueError:
+                self.mesh_file_index = np.random.choice(range(len(self.dataset["filenames"])))  # sometimes there are no targets in a given entry of the xml and the code will throw an error, this is to prevent that and choose another xml
+        target_index = 0
+        tool_old = self.tool  # remember the old tool for checking in a moment
+        self._set_target(self.mesh_file_index, target_index)
+        self._set_target_box(self.ee_pos_reward_thresh)
+        if self.show_target:
+            self._show_target()
+        #tmp, set to one tool for now, full implementation for both tools later on
+        self.tool=0
+
+        # load in the robot, the correct tool was set above in the _set_target method call
+        if self.tool == tool_old and not complete_reset:
+            # if the tool has stayed the same, we can avoid an expensive load in of the robot mesh from the drive and simply change its current position
+            pyb.resetBasePositionAndOrientation(self.robot, np.append(self.target_base, self.ceiling_mount_height), pyb.getQuaternionFromEuler([np.pi, 0, 0]))
+        else:
+            # if the tool has changed (or we're running the env for the first time or completely reseting), loading in the robot mesh is necessary
+            if self.tool:
+                self.robot = self._add_object("kr16/kr16_tand_gerad.urdf", np.append(self.target_base, self.ceiling_mount_height), pyb.getQuaternionFromEuler([np.pi, 0, 0]))
+            else:
+                self.robot = self._add_object("kr16/kr16_mrw510.urdf", np.append(self.target_base, self.ceiling_mount_height), pyb.getQuaternionFromEuler([np.pi, 0, 0]))      
+
+        # get the joint ids of the robot and set the joints to their resting position
+        joints = [pyb.getJointInfo(self.robot, i) for i in range(pyb.getNumJoints(self.robot))]
+        self.joint_ids = [j[0] for j in joints if j[2] == pyb.JOINT_REVOLUTE]
+        self._set_joint_state(self.resting_pose_angles)
+        self.joints = self.resting_pose_angles
+        # in training set the arm to a random position sometimes to force a variety of starting positions
+        if self.train:
+            if np.random.random() < -1:
+                start = True
+                while start or self._collision():
+                    start = False
+                    random_xyz_offset = np.random.random(3) * 2 - 1
+                    random_xyz_offset[2] = abs(random_xyz_offset[2])
+                    random_xyz_offset = random_xyz_offset * (max(self.ee_pos_reward_thresh * 1.5, np.random.random()) / np.linalg.norm(random_xyz_offset))
+                    random_rpy = np.random.uniform(low=self.rpy_lower_limits, high=self.rpy_upper_limits, size=3)
+                    self.joints = self._movep(self.target +  random_xyz_offset, self._quat_w_to_ee(util.rpy_to_quaternion(random_rpy)))
+                    start = np.linalg.norm(np.array(pyb.getLinkState(self.robot, self.end_effector_link_id, computeForwardKinematics=True)[4]) - (random_xyz_offset + self.target)) > self.ee_pos_reward_thresh * 1.5
+
+        # get state information
+        ee_link_state = pyb.getLinkState(self.robot, self.end_effector_link_id, computeForwardKinematics=True)
+        self.pos = np.array(ee_link_state[4])
+        self.pos_last = self.pos
+        self.rot = np.array(ee_link_state[5])
+        self.rot_internal = self._quat_ee_to_w(np.array(ee_link_state[1]))
+        self.lidar_indicator, self.lidar_indicator_raw = self._get_lidar_indicator()
+        self.max_dist = np.linalg.norm(self.pos - self.target)
+        self.min_dist = self.max_dist
+        self.distance = self.max_dist
+
+        rot_internal = np.array(ee_link_state[1])
+        self.view_matrix = pyb.computeViewMatrix(self.pos, self.pos-0.01*util.rotate_vec(rot_internal, np.array([0,0,1])), util.rotate_vec(rot_internal ,np.array([1,0,0])))
+        self.camera_image = self._get_camera_image()
+
+        if self.train:
+            if len(self.success_buffer) != 0:
+                success_rate = np.average(self.success_buffer) 
+            else:
+                success_rate = 0
+            if success_rate < 0.8 and self.ee_pos_reward_thresh < self.ee_pos_reward_thresh_max and not self.is_success:
+                self.ee_pos_reward_thresh += util.linear_interpolation(self.ee_pos_reward_thresh, self.ee_pos_reward_thresh_min, self.ee_pos_reward_thresh_max, self.ee_pos_reward_thresh_min_increment, self.ee_pos_reward_thresh_max_increment) / 15
+            elif success_rate > 0.8 and self.ee_pos_reward_thresh > self.ee_pos_reward_thresh_min and self.is_success:
+                self.ee_pos_reward_thresh -= util.linear_interpolation(self.ee_pos_reward_thresh, self.ee_pos_reward_thresh_min, self.ee_pos_reward_thresh_max, self.ee_pos_reward_thresh_min_increment, self.ee_pos_reward_thresh_max_increment) 
+            if self.ee_pos_reward_thresh < self.ee_pos_reward_thresh_min:
+                self.ee_pos_reward_thresh = self.ee_pos_reward_thresh_min
+            if self.ee_pos_reward_thresh > self.ee_pos_reward_thresh_max:
+                self.ee_pos_reward_thresh = self.ee_pos_reward_thresh_max
+        
+        self.is_success = False
+
+        # turn on rendering again
+        pyb.configureDebugVisualizer(pyb.COV_ENABLE_RENDERING, 1)
+
+        return self._get_obs()
+    
+    def step(self, action):
+        
+        _, reward, done, info = super().step(action)
+
+        if ((self.steps_total -  1) % self.take_image_every_x_steps) == 0:
+            ee_link_state = pyb.getLinkState(self.robot, self.end_effector_link_id, computeForwardKinematics=True)
+            rot_internal = np.array(ee_link_state[1])
+            self.view_matrix = pyb.computeViewMatrix(self.pos, self.pos-0.01*util.rotate_vec(rot_internal, np.array([0,0,1])), util.rotate_vec(rot_internal ,np.array([1,0,0])))
+            self.camera_image = self._get_camera_image()
+
+        return self._get_obs(), reward, done, info
+    
+    def _get_obs(self):
+        spatial = np.zeros(13)
+        if self.normalize:   
+            spatial[:6] = np.multiply(self.normalizing_constant_a[:6], self.joints) + self.normalizing_constant_b[:6]
+            spatial[6:9] = np.multiply(self.normalizing_constant_a[6:9], (self.target - self.pos)) + self.normalizing_constant_b[6:9]
+            spatial[9:12] = np.multiply(self.normalizing_constant_a[9:12], util.quaternion_to_rpy(self.rot_internal)) +  self.normalizing_constant_b[9:12]
+            spatial[12] = self.normalizing_constant_a[12] * self.distance + self.normalizing_constant_b[12]
+        else:
+            spatial[:6] = self.joints
+            spatial[6:9] = self.target - self.pos
+            spatial[9:12] = util.quaternion_to_rpy(self.rot_internal)
+            spatial[12] = self.distance
+
+        return {
+            'spatial': spatial if self.use_joints else spatial[6:],
+            'lidar': self.lidar_indicator if not self.use_raw_lidar else self.lidar_indicator_raw,
+            'camera': self.camera_image
+        }
+    
+    def _get_camera_image(self):
+        img = (pyb.getCameraImage(32, 32, self.view_matrix, self.projection_matrix))[3]
+        img = np.array(img)
+        img = 0.001 * 100 / (100 - (100 - 0.001) * img)
+        img = np.reshape(img, (32, 32))
+        return img
+
+
+
