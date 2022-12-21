@@ -12,5 +12,6 @@ scripts/saved_trees
 model/weights
 model/tf_board_logs
 model/saved_envs
+model/logs
 *.zip
 test
