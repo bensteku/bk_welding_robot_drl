@@ -33,8 +33,11 @@ class PathingEnvironmentPybullet(gym.Env):
         # task specific settings that need to be set after everything else
         self._init_task_settings_post(env_config["task"])
 
-        # Determines wether the reset performs a full or just a soft reset
+        # determines wether the reset performs a full or just a soft reset
         self.cold_start = True  # env has to be built from scratch as this is the programm start
+
+        # set the epoch for execution such that time stamps are relative rather than absolute
+        self.epoch = time()
 
     def _init_task_settings_pre(self, task_settings):
         """
@@ -64,11 +67,14 @@ class PathingEnvironmentPybullet(gym.Env):
         # bool: eval or train mode
         self.train = env_config["train"]
 
-        # path for asset files
+        # string: path for asset files
         self.asset_files_path = env_config["asset_files_path"]
 
+        # dict: task as key and task settings as value
+        self.task = env_config["task"]
+
         # bool: actions as xyz and rpy movements or joint movements
-        self.use_joints = env_config["use_joints"]  # TODO: rename to "joint_actions"
+        self.joint_actions = env_config["joint_actions"]  # TODO: rename to "joint_actions"
 
         # dict: contains all the sensors used for the model as keys(strings) and their configuration as values(dicts)
         self.sensors = env_config["sensor_config"]
@@ -76,16 +82,25 @@ class PathingEnvironmentPybullet(gym.Env):
             if sensor not in ["lidar"]:#, "ee_rgb", "ee_depth", "fixed_rgb", "fixed_depth", "moving_rgb", "moving_depth"]:  # TODO
                 raise ValueError("Sensor "+sensor+" not recognized/implemented!")
 
-        # list: contains all goals for the model as strings
+        # bool: normalize observations and rewards
+        self.normalize = env_config["normalize"]
+        
+        # dict: contains all goals for the model as keys, values contain dicts that further set how the reward shall be processed
         self.goals = env_config["goals"]
+        min_reward = np.inf
+        max_reward = -np.inf
         for goal in self.goals:
+            min_reward = min(min_reward, goal["reward"])
+            max_reward = max(max_reward, goal["reward"])
             if goal not in ["collision", "clearance", "rotation"]:
                 raise ValueError("Goal "+goal+" not recognized/implemented!")
         if "clearance" in self.goals and not "lidar" in self.sensors:
             raise ValueError("Clearance as a goal is only possible with lidar sensor input!")
-
-        # bool: normalize observations and rewards
-        self.normalize = env_config["normalize"]
+        if self.normalize and abs(min_reward) != max_reward:
+            raise ValueError("Normalizing is activated and min/max reward are not symmetrical! This would lead to improper mapping between -1 and 1!")
+        # set up the normalizing constant for normalizing rewards
+        self.reward_normalizing_a = 2 / (max_reward - min_reward)
+        self.reward_normalizing_b = 1 - self.reward_normalizing_a * max_reward
 
         # float: gamma, just used for record keeping such that the discounted episode total reward is roughly the same as the one calculated by the automatic StableBaselines logging
         self.gamma = env_config["gamma"]
@@ -102,11 +117,17 @@ class PathingEnvironmentPybullet(gym.Env):
         """
         Initializes several variables related to handling PyBullet.
         """
-        # list of pybullet object ids currently in the env
-        self.obj_ids = []
+        # list of pybullet object ids currently in the env aside from the robot
+        self.obstacles = []
 
         # pybullet robot id
-        self.robot = None  # TODO: rename to robot_id
+        self.robot_id = None  # TODO: rename to robot_id
+
+        # ids of the joints of the robot
+        self.joint_ids = None
+        # link ids of the base and end effector of the robot
+        self.robot_ee_id = None
+        self.robot_base_id = None
 
         # variables storing information about the current state, saves performance from having to 
         # access the pybullet interface all the time
@@ -119,7 +140,7 @@ class PathingEnvironmentPybullet(gym.Env):
         self.target_norms = None
         self.target_rot = None
         self.lidar_indicator = None
-        self.lidar_indicator_raw = None  # TODO: rename to lidar_distances
+        self.lidar_distances = None 
         self.joints = None
         self.joints_vel = None
         self.max_dist = None
@@ -145,6 +166,17 @@ class PathingEnvironmentPybullet(gym.Env):
         Initializes several settings related to stuff not covered by the other methods.
         This includes things like training related variables.
         """
+        # statistics and housekeeping
+        self.episodes = 0
+        self.discounted_reward_current_episode = 0
+        self.distance_current_episode = 0
+        self.steps_current_episode = 0
+        self.steps_all_episodes = 0
+
+        self.collisions = 0
+        self.clearance_failures = 0
+        self.is_success = False
+        
         # thresholds for the end effector for maximum reward
         # and values for modifiyng it during training
         if self.train:
@@ -237,7 +269,7 @@ class PathingEnvironmentPybullet(gym.Env):
             self.rotation_normalizing_b[6] = 0  # same as above
 
         # add current joint positions to observation space if needed
-        if self.use_joints:
+        if self.joint_actions:
             joints_dims = 6
             obs_space_dict["joints"] = gym.spaces.Box(low=-1 if self.normalize else self.joints_lower_limits, high=1 if self.normalize else self.joints_upper_limits, shape=(joints_dims,), dtype=np.float32)
             
@@ -291,3 +323,93 @@ class PathingEnvironmentPybullet(gym.Env):
         
         # the action space is always normalized, its elements get interpreted in the code further down
         self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(action_dims,), dtype=np.float32)
+
+    def reset(self):
+        """
+        Generalized reset method.
+        """
+
+        self.time = time() - self.epoch
+        
+        # determine wether a complete reset is necessary or not
+        complete_reset = self.cold_start or self.episodes % self.task.complete_reset_rate == 0
+        self.cold_start = False
+
+        # set relevant counters
+        self.steps_current_episode = 0
+        self.episodes += 1
+        self.discounted_reward_current_episode = 0
+        self.distance_current_episode = 0
+
+        # reset the environment
+        if complete_reset:
+            # rebuild the entire environment from scratch
+            self.robot_id, self.obstacles, self.target = self.task.reset_hard()
+        else:
+            # just reset robot position and get new target
+            self.target = self.task.reset_soft()
+
+        # get state information
+        ee_link_state = pyb.getLinkState(self.robot, self.end_effector_link_id, computeForwardKinematics=True)
+        self.pos = np.array(ee_link_state[4])
+        self.pos_last = self.pos
+        self.pos_vel = np.zeros(3)
+        self.joints_vel = np.zeros(6)
+        self.rot = np.array(ee_link_state[5])
+        if self.task.use_internal_rot:
+            self.rot_internal = self._quat_ee_to_w(np.array(ee_link_state[1]))
+        if "lidar" in self.sensor:
+            self.lidar_indicator, self.lidar_distances = self._get_lidar_data()
+        if "ee_rgb" in self.sensors or "ee_depth" in self.sensors:
+            self.ee_rgb_img, self.ee_depth_img = self._get_ee_image()  # both images get taken anyway, so no possible performance gain by separating them
+        if "fixed_rgb" in self.sensors or "fixed_depth" in self.sensors:
+            self.fixed_rgb_img, self.fixed_depth_img = self._get_fixed_image()
+        if "moving_rgb" in self.sensors or "moving_depth" in self.sensors:
+            self.moving_rgb_img, self.moving_depth_img = self._get_moving_image()
+        self.distance = np.linalg.norm(self.pos - self.target)
+
+        # TODO: add camera setup for the various image sensors in one of the setup methods above
+
+        # adjust the success thresholds
+        # TODO: rewrite the success threshold such that only those tresholds appear/get updated that are actually needed
+        if self.train:
+            if len(self.success_buffer) != 0:
+                success_rate_rot = np.average(self.success_rot_buffer) 
+                success_rate_pos = np.average(self.success_pos_buffer)
+            else:
+                success_rate_rot = 0
+                success_rate_pos = 0
+            if success_rate_pos > 0.8:
+                if self.ee_pos_reward_thresh > self.ee_pos_reward_thresh_min and self.is_success:
+                    self.ee_pos_reward_thresh -= util.linear_interpolation(self.ee_pos_reward_thresh, self.ee_pos_reward_thresh_min, self.ee_pos_reward_thresh_max, self.ee_pos_reward_thresh_min_increment, self.ee_pos_reward_thresh_max_increment)
+            if success_rate_rot > 0.8:
+                if self.ee_rot_reward_thresh > self.ee_rot_reward_thresh_min and self.is_success:
+                    self.ee_rot_reward_thresh -= util.linear_interpolation(self.ee_rot_reward_thresh, self.ee_rot_reward_thresh_min, self.ee_rot_reward_thresh_max, self.ee_rot_reward_thresh_min_increment, self.ee_rot_reward_thresh_max_increment) 
+            if self.ee_pos_reward_thresh < self.ee_pos_reward_thresh_min:
+                self.ee_pos_reward_thresh = self.ee_pos_reward_thresh_min
+            if self.ee_pos_reward_thresh > self.ee_pos_reward_thresh_max:
+                self.ee_pos_reward_thresh = self.ee_pos_reward_thresh_max
+            if self.ee_rot_reward_thresh < self.ee_rot_reward_thresh_min:
+                self.ee_rot_reward_thresh = self.ee_rot_reward_thresh_min
+            if self.ee_rot_reward_thresh > self.ee_rot_reward_thresh_max:
+                self.ee_rot_reward_thresh = self.ee_rot_reward_thresh_max
+
+        # reset success
+        self.is_success = False
+
+        # logging
+        if self.logging > 0:
+            self.log = []
+            log = []
+            log.append(self.time)
+            log += self.pos.tolist()
+            log += self.rot_internal.tolist()
+            log.append(self.distance)
+            log += self.pos_vel.tolist()
+            log += self.joints_vel.tolist()
+            self.log.append(log)
+
+        return self._get_obs()
+
+    def _get_obs(self):
+
