@@ -147,7 +147,6 @@ class PathingEnvironmentPybullet(gym.Env):
         self.target_rot = None
         self.lidar_indicator = None
         self.lidar_indicator_raw = None
-        self.lidar_probe = None
         self.joints = None
         self.joints_vel = None
         self.max_dist = None
@@ -510,7 +509,7 @@ class PathingEnvironmentPybullet(gym.Env):
         # steps vor collision angucken
 
         collided = self._collision()
-        clearance_failed = np.min(self.lidar_indicator_raw) < self.minimal_clearance
+        clearance_failed = bool(np.min(self.lidar_indicator_raw) < self.minimal_clearance)
         out_of_bounds = False
         is_in_target = False
         is_in_desired_orientation = False
@@ -670,9 +669,10 @@ class PathingEnvironmentPybullet(gym.Env):
         pyb.performCollisionDetection()  # perform just the collision detection part of the PyBullet engine
         col = False
         for obj in self.obj_ids:
-            if len(pyb.getContactPoints(self.robot, obj)) > 0:
-                col = True 
-                break
+            if obj != self.robot:
+                if len(pyb.getContactPoints(self.robot, obj)) > 0:
+                    col = True 
+                    break
         return col
 
     def _move_base(self, position):
@@ -938,7 +938,7 @@ class PathingEnvironmentPybullet(gym.Env):
         yaw = pyb.addUserDebugParameter("y", -4.0, 4.0, rpy[2])
         fwdxId = pyb.addUserDebugParameter("fwd_x", -4, 8, self.pos[0])
         fwdyId = pyb.addUserDebugParameter("fwd_y", -4, 8, self.pos[1])
-        fwdzId = pyb.addUserDebugParameter("fwd_z", 0, 0.6, self.pos[2])
+        fwdzId = pyb.addUserDebugParameter("fwd_z", -1, 3, self.pos[2])
         fwdxIdbase = pyb.addUserDebugParameter("fwd_x_base", -4, 8, 0)
         fwdyIdbase = pyb.addUserDebugParameter("fwd_y_base", -4, 8, 0)
         x_base = 0
@@ -984,8 +984,12 @@ class PathingEnvironmentPybullet(gym.Env):
             self.max_dist = np.linalg.norm(self.pos - self.target)
             self.min_dist = self.max_dist
 
-            print(self.lidar_indicator_raw)
-            print(pyb.getClosestPoints(self.robot, self.obj_ids[2], 20, self.end_effector_link_id))
+            ee_link_state = pyb.getLinkState(self.robot, self.base_link_id, computeForwardKinematics=True)
+
+            #print(self.lidar_indicator_raw)
+            #print(pyb.getClosestPoints(self.robot, self.obj_ids[2], 20, self.end_effector_link_id))
+            print(self.pos)
+            print(self.pos - np.array(ee_link_state[4]))
 
             lineID = pyb.addUserDebugLine([x,y,z], self.pos.tolist(), [0,0,0])
 
@@ -1377,7 +1381,13 @@ class PathingEnvironmentPybulletTestingObstacles(PathingEnvironmentPybullet):
         self.rots = np.zeros((500,4))
         self.idx = 0
 
-        self.test_case = 1
+        if self.train:
+            if np.random.random() < 0.75:
+                self.test_case = 0
+            else:
+                self.test_case = 1
+        else:
+            self.test_case = 0
         self.moving_plate = 0
 
         if self.train:
@@ -1603,15 +1613,44 @@ class PathingEnvironmentPybulletTestingObstacles(PathingEnvironmentPybullet):
         self.obj_ids.append(self.moving_plate)
 
     def _build_test_case_1(self):
-        self.init_home = [0.15,0.4,0.3]
-        self.init_orn = self._quat_w_to_ee(util.rpy_to_quaternion([0,0,0]))
-        self.target_position = [-0.15,0.4,0.3]
+        random_int = np.random.random_integers(0,4)
+        if random_int == 0:
+            self.init_home = [0.15,0.4,0.3]
+            self.init_orn = self._quat_w_to_ee(util.rpy_to_quaternion([0,0,0]))
+            self.target_position = [-0.15,0.4,0.3]
+            halfExtents = [0.002,0.1,0.05]
+            basePosition = [0.0,0.4,0.3]
+        elif random_int == 1:
+            self.init_home = [-0.15,0.4,0.3]
+            self.init_orn = self._quat_w_to_ee(util.rpy_to_quaternion([0,0,0]))
+            self.target_position = [0.15,0.4,0.3]
+            halfExtents = [0.002,0.1,0.05]
+            basePosition = [0.0,0.4,0.3]
+        elif random_int == 2:
+            self.init_home = [0.0,0.35,0.3]
+            self.init_orn = self._quat_w_to_ee(util.rpy_to_quaternion([0,0,0]))
+            self.target_position = [0.0,0.65,0.3]
+            halfExtents = [0.1,0.002,0.05]
+            basePosition = [0.0,0.5,0.3]
+        elif random_int == 3:
+            self.init_home = [0.0,0.65,0.3]
+            self.init_orn = self._quat_w_to_ee(util.rpy_to_quaternion([0,0,0]))
+            self.target_position = [0.0,0.35,0.3]
+            halfExtents = [0.1,0.002,0.05]
+            basePosition = [0.0,0.5,0.3]
+        else:
+            self.init_home = [0.0,0.4,0.38]
+            self.init_orn = self._quat_w_to_ee(util.rpy_to_quaternion([0,0,0]))
+            self.target_position = [0.0,0.4,0.22]
+            halfExtents = [0.1,0.1,0.002]
+            basePosition = [0.0,0.4,0.3]
+        
         self.target = np.array(self.target_position)
         obst_1 = pyb.createMultiBody(
             baseMass=0,
-            baseVisualShapeIndex=pyb.createVisualShape(shapeType=pyb.GEOM_BOX, halfExtents=[0.002,0.1,0.05], rgbaColor=[0.5,0.5,0.5,1]),
-            baseCollisionShapeIndex=pyb.createCollisionShape(shapeType=pyb.GEOM_BOX, halfExtents=[0.002,0.1,0.05]),
-            basePosition=[0.0,0.4,0.3],
+            baseVisualShapeIndex=pyb.createVisualShape(shapeType=pyb.GEOM_BOX, halfExtents=halfExtents, rgbaColor=[0.5,0.5,0.5,1]),
+            baseCollisionShapeIndex=pyb.createCollisionShape(shapeType=pyb.GEOM_BOX, halfExtents=halfExtents),
+            basePosition=basePosition,
             baseOrientation=choice([0.707, 0, 0, 0.707])
         )
         self.obj_ids.append(obst_1)
